@@ -2139,7 +2139,7 @@ mod bucketed_history {
 	impl_writeable_tlv_based!(LegacyHistoricalBucketRangeTracker, { (0, buckets, required) });
 
 	#[derive(Clone, Copy)]
-	#[repr(C)] // Force the fields in memory to be in the order we specify.
+	#[repr(C)]// Force the fields in memory to be in the order we specify.
 	pub(super) struct HistoricalLiquidityTracker {
 		// This struct sits inside a `(u64, ChannelLiquidity)` in memory, and we first read the
 		// liquidity offsets in `ChannelLiquidity` when calculating the non-historical score. This
