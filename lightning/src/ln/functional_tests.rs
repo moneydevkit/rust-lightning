@@ -22,7 +22,7 @@ use crate::events::bump_transaction::WalletSource;
 use crate::events::{Event, FundingInfo, MessageSendEvent, MessageSendEventsProvider, PathFailure, PaymentPurpose, ClosureReason, HTLCDestination, PaymentFailureReason};
 use crate::ln::types::ChannelId;
 use crate::types::payment::{PaymentPreimage, PaymentSecret, PaymentHash};
-use crate::ln::channel::{CONCURRENT_INBOUND_HTLC_FEE_BUFFER, FEE_SPIKE_BUFFER_FEE_INCREASE_MULTIPLE, MIN_AFFORDABLE_HTLC_COUNT, get_holder_selected_channel_reserve_satoshis, OutboundV1Channel, InboundV1Channel, COINBASE_MATURITY, ChannelPhase};
+use crate::ln::channel::{get_holder_selected_channel_reserve_satoshis, ChannelPhase, InboundV1Channel, OutboundV1Channel, COINBASE_MATURITY, CONCURRENT_INBOUND_HTLC_FEE_BUFFER, FEE_SPIKE_BUFFER_FEE_INCREASE_MULTIPLE, MIN_AFFORDABLE_HTLC_COUNT};
 use crate::ln::channelmanager::{self, PaymentId, RAACommitmentOrder, RecipientOnionFields, BREAKDOWN_TIMEOUT, ENABLE_GOSSIP_TICKS, DISABLE_GOSSIP_TICKS, MIN_CLTV_EXPIRY_DELTA};
 use crate::ln::channel::{ANCHOR_OUTPUT_VALUE_SATOSHI, DISCONNECT_PEER_AWAITING_RESPONSE_TICKS, ChannelError};
 use crate::ln::{chan_utils, onion_utils};
@@ -30,14 +30,14 @@ use crate::ln::chan_utils::{commitment_tx_base_weight, COMMITMENT_TX_WEIGHT_PER_
 use crate::routing::gossip::{NetworkGraph, NetworkUpdate};
 use crate::routing::router::{Path, PaymentParameters, Route, RouteHop, get_route, RouteParameters};
 use crate::types::features::{ChannelFeatures, ChannelTypeFeatures, NodeFeatures};
-use crate::ln::msgs;
+use crate::ln::msgs::{self, AcceptChannel};
 use crate::ln::msgs::{ChannelMessageHandler, RoutingMessageHandler, ErrorAction};
 use crate::util::test_channel_signer::TestChannelSigner;
 use crate::util::test_utils::{self, TestLogger, WatchtowerPersister};
 use crate::util::errors::APIError;
 use crate::util::ser::{Writeable, ReadableArgs};
 use crate::util::string::UntrustedString;
-use crate::util::config::{UserConfig, MaxDustHTLCExposure};
+use crate::util::config::{ChannelConfigOverrides, ChannelHandshakeConfigUpdate, ChannelConfigUpdate, MaxDustHTLCExposure, UserConfig};
 
 use bitcoin::hash_types::BlockHash;
 use bitcoin::locktime::absolute::LockTime;
@@ -8468,12 +8468,14 @@ fn test_channel_update_has_correct_htlc_maximum_msat() {
 fn test_manually_accept_inbound_channel_request() {
 	let mut manually_accept_conf = UserConfig::default();
 	manually_accept_conf.manually_accept_inbound_channels = true;
+	manually_accept_conf.channel_handshake_config.minimum_depth = 1;
+
 	let chanmon_cfgs = create_chanmon_cfgs(2);
 	let node_cfgs = create_node_cfgs(2, &chanmon_cfgs);
 	let node_chanmgrs = create_node_chanmgrs(2, &node_cfgs, &[None, Some(manually_accept_conf.clone())]);
 	let nodes = create_network(2, &node_cfgs, &node_chanmgrs);
 
-	let temp_channel_id = nodes[0].node.create_channel(nodes[1].node.get_our_node_id(), 100000, 10001, 42, None, Some(manually_accept_conf)).unwrap();
+	nodes[0].node.create_channel(nodes[1].node.get_our_node_id(), 100000, 10001, 42, None, Some(manually_accept_conf)).unwrap();
 	let res = get_event_msg!(nodes[0], MessageSendEvent::SendOpenChannel, nodes[1].node.get_our_node_id());
 
 	nodes[1].node.handle_open_channel(nodes[0].node.get_our_node_id(), &res);
@@ -8482,10 +8484,28 @@ fn test_manually_accept_inbound_channel_request() {
 	// accepting the inbound channel request.
 	assert!(nodes[1].node.get_and_clear_pending_msg_events().is_empty());
 
+	let config_overrides = ChannelConfigOverrides {
+		handshake_overrides: Some(ChannelHandshakeConfigUpdate {
+			max_inbound_htlc_value_in_flight_percent_of_channel: None,
+			htlc_minimum_msat: None,
+			minimum_depth: None,
+			to_self_delay: None,
+			max_accepted_htlcs: Some(3),
+			channel_reserve_proportional_millionths: None,
+		}),
+		update_overrides: Some(ChannelConfigUpdate {
+			forwarding_fee_proportional_millionths: None,
+			forwarding_fee_base_msat: Some(555),
+			cltv_expiry_delta: None,
+			max_dust_htlc_exposure_msat: None,
+			force_close_avoidance_max_fee_satoshis: None,
+			accept_underpaying_htlcs: None,
+		}),
+	};
 	let events = nodes[1].node.get_and_clear_pending_events();
 	match events[0] {
 		Event::OpenChannelRequest { temporary_channel_id, .. } => {
-			nodes[1].node.accept_inbound_channel(&temporary_channel_id, &nodes[0].node.get_our_node_id(), 23).unwrap();
+			nodes[1].node.accept_inbound_channel(&temporary_channel_id, &nodes[0].node.get_our_node_id(), 23, Some(config_overrides)).unwrap();
 		}
 		_ => panic!("Unexpected event"),
 	}
@@ -8493,25 +8513,65 @@ fn test_manually_accept_inbound_channel_request() {
 	let accept_msg_ev = nodes[1].node.get_and_clear_pending_msg_events();
 	assert_eq!(accept_msg_ev.len(), 1);
 
+	let ref accept_channel: AcceptChannel;
 	match accept_msg_ev[0] {
-		MessageSendEvent::SendAcceptChannel { ref node_id, .. } => {
+		MessageSendEvent::SendAcceptChannel { ref node_id, ref msg } => {
 			assert_eq!(*node_id, nodes[0].node.get_our_node_id());
+
+			// Assert overriden handshake parameter.
+			assert_eq!(msg.common_fields.max_accepted_htlcs, 3);
+
+			accept_channel = msg;
 		}
 		_ => panic!("Unexpected event"),
 	}
-	let error_message = "Channel force-closed";
-	nodes[1].node.force_close_broadcasting_latest_txn(&temp_channel_id, &nodes[0].node.get_our_node_id(), error_message.to_string()).unwrap();
 
-	let close_msg_ev = nodes[1].node.get_and_clear_pending_msg_events();
-	assert_eq!(close_msg_ev.len(), 1);
+	// Continue channel opening process until channel update messages are sent.
+	nodes[0].node.handle_accept_channel(nodes[1].node.get_our_node_id(), &accept_channel);
+	let (temporary_channel_id, tx, funding_outpoint) = create_funding_transaction(&nodes[0], &nodes[1].node.get_our_node_id(), 100_000, 42);
+	nodes[0].node.unsafe_manual_funding_transaction_generated(temporary_channel_id, nodes[1].node.get_our_node_id(), funding_outpoint).unwrap();
+	check_added_monitors!(nodes[0], 0);
 
-	let events = nodes[1].node.get_and_clear_pending_events();
-	match events[0] {
-		Event::ChannelClosed { user_channel_id, .. } => {
-			assert_eq!(user_channel_id, 23);
-		}
+	let funding_created = get_event_msg!(nodes[0], MessageSendEvent::SendFundingCreated, nodes[1].node.get_our_node_id());
+	nodes[1].node.handle_funding_created(nodes[0].node.get_our_node_id(), &funding_created);
+	check_added_monitors!(nodes[1], 1);
+	expect_channel_pending_event(&nodes[1], &nodes[0].node.get_our_node_id());
+
+	let funding_signed = get_event_msg!(nodes[1], MessageSendEvent::SendFundingSigned, nodes[0].node.get_our_node_id());
+	nodes[0].node.handle_funding_signed(nodes[1].node.get_our_node_id(), &funding_signed);
+	check_added_monitors!(nodes[0], 1);
+	let events = &nodes[0].node.get_and_clear_pending_events();
+	assert_eq!(events.len(), 2);
+	match &events[0] {
+		crate::events::Event::FundingTxBroadcastSafe { funding_txo, .. } => {
+			assert_eq!(funding_txo.txid, funding_outpoint.txid);
+			assert_eq!(funding_txo.vout, funding_outpoint.index.into());
+		},
 		_ => panic!("Unexpected event"),
-	}
+	};
+	match &events[1] {
+		crate::events::Event::ChannelPending { counterparty_node_id, .. } => {
+			assert_eq!(*&nodes[1].node.get_our_node_id(), *counterparty_node_id);
+		},
+		_ => panic!("Unexpected event"),
+	};
+
+	mine_transaction(&nodes[0], &tx);
+	mine_transaction(&nodes[1], &tx);
+
+	let as_channel_ready = get_event_msg!(nodes[1], MessageSendEvent::SendChannelReady, nodes[0].node.get_our_node_id());
+	nodes[1].node.handle_channel_ready(nodes[0].node.get_our_node_id(), &as_channel_ready);
+	let as_channel_ready = get_event_msg!(nodes[0], MessageSendEvent::SendChannelReady, nodes[1].node.get_our_node_id());
+	nodes[0].node.handle_channel_ready(nodes[1].node.get_our_node_id(), &as_channel_ready);
+
+	expect_channel_ready_event(&nodes[0], &nodes[1].node.get_our_node_id());
+	expect_channel_ready_event(&nodes[1], &nodes[0].node.get_our_node_id());
+
+	// Assert that the overriden base fee surfaces in the channel update.
+	let channel_update = get_event_msg!(nodes[1], MessageSendEvent::SendChannelUpdate, nodes[0].node.get_our_node_id());
+	assert_eq!(channel_update.contents.fee_base_msat, 555);
+
+	get_event_msg!(nodes[0], MessageSendEvent::SendChannelUpdate, nodes[1].node.get_our_node_id());
 }
 
 #[test]
@@ -8575,8 +8635,8 @@ fn test_can_not_accept_inbound_channel_twice() {
 	let events = nodes[1].node.get_and_clear_pending_events();
 	match events[0] {
 		Event::OpenChannelRequest { temporary_channel_id, .. } => {
-			nodes[1].node.accept_inbound_channel(&temporary_channel_id, &nodes[0].node.get_our_node_id(), 0).unwrap();
-			let api_res = nodes[1].node.accept_inbound_channel(&temporary_channel_id, &nodes[0].node.get_our_node_id(), 0);
+			nodes[1].node.accept_inbound_channel(&temporary_channel_id, &nodes[0].node.get_our_node_id(), 0, None).unwrap();
+			let api_res = nodes[1].node.accept_inbound_channel(&temporary_channel_id, &nodes[0].node.get_our_node_id(), 0, None);
 			match api_res {
 				Err(APIError::APIMisuseError { err }) => {
 					assert_eq!(err, "No such channel awaiting to be accepted.");
@@ -8608,7 +8668,7 @@ fn test_can_not_accept_unknown_inbound_channel() {
 	let nodes = create_network(2, &node_cfg, &node_chanmgr);
 
 	let unknown_channel_id = ChannelId::new_zero();
-	let api_res = nodes[0].node.accept_inbound_channel(&unknown_channel_id, &nodes[1].node.get_our_node_id(), 0);
+	let api_res = nodes[0].node.accept_inbound_channel(&unknown_channel_id, &nodes[1].node.get_our_node_id(), 0, None);
 	match api_res {
 		Err(APIError::APIMisuseError { err }) => {
 			assert_eq!(err, "No such channel awaiting to be accepted.");
@@ -11616,7 +11676,7 @@ fn test_accept_inbound_channel_errors_queued() {
 	let events = nodes[1].node.get_and_clear_pending_events();
 	match events[0] {
 		Event::OpenChannelRequest { temporary_channel_id, .. } => {
-			match nodes[1].node.accept_inbound_channel(&temporary_channel_id, &nodes[0].node.get_our_node_id(), 23) {
+			match nodes[1].node.accept_inbound_channel(&temporary_channel_id, &nodes[0].node.get_our_node_id(), 23, None) {
 				Err(APIError::ChannelUnavailable { err: _ }) => (),
 				_ => panic!(),
 			}
@@ -11725,295 +11785,4 @@ fn test_funding_signed_event() {
 	expect_channel_ready_event(&nodes[1], &nodes[0].node.get_our_node_id());
 	nodes[0].node.get_and_clear_pending_msg_events();
 	nodes[1].node.get_and_clear_pending_msg_events();
-}
-
-#[test]
-pub fn test_dust_limit_fee_accounting() {
-	do_test_dust_limit_fee_accounting(false);
-	do_test_dust_limit_fee_accounting(true);
-}
-
-pub fn do_test_dust_limit_fee_accounting(can_afford: bool) {
-	// Test that when a channel funder sends HTLCs exactly on the dust limit
-	// of the funder, the fundee correctly accounts for the additional fee on the
-	// funder's commitment transaction due to those additional non-dust HTLCs when
-	// checking for any infrigements on the funder's reserve.
-
-	let channel_type = ChannelTypeFeatures::anchors_zero_htlc_fee_and_dependencies();
-
-	let chanmon_cfgs = create_chanmon_cfgs(2);
-
-	let mut default_config = test_default_channel_config();
-	default_config.channel_handshake_config.negotiate_anchors_zero_fee_htlc_tx = true;
-	default_config.manually_accept_inbound_channels = true;
-
-	let node_cfgs = create_node_cfgs(2, &chanmon_cfgs);
-	let node_chanmgrs =
-		create_node_chanmgrs(2, &node_cfgs, &[Some(default_config.clone()), Some(default_config)]);
-
-	let mut nodes = create_network(2, &node_cfgs, &node_chanmgrs);
-
-	let node_a_id = nodes[0].node.get_our_node_id();
-
-	// Set a HTLC amount that is equal to the dust limit of the funder
-	const HTLC_AMT_SAT: u64 = 354;
-
-	const CHANNEL_VALUE_SAT: u64 = 100_000;
-
-	const FEERATE_PER_KW: u32 = 253;
-
-	let commit_tx_fee_sat =
-		chan_utils::commit_tx_fee_sat(FEERATE_PER_KW, MIN_AFFORDABLE_HTLC_COUNT, &channel_type);
-
-	// By default the reserve is set to 1% or 1000sat, whichever is higher
-	let channel_reserve_satoshis = 1_000;
-
-	// Set node 0's balance to pay for exactly MIN_AFFORDABLE_HTLC_COUNT non-dust HTLCs on the channel, minus some offset
-	let node_0_balance_sat = commit_tx_fee_sat
-		+ channel_reserve_satoshis
-		+ 2 * crate::ln::channel::ANCHOR_OUTPUT_VALUE_SATOSHI
-		+ MIN_AFFORDABLE_HTLC_COUNT as u64 * HTLC_AMT_SAT
-		- if can_afford { 0 } else { 1 };
-	let mut node_1_balance_sat = CHANNEL_VALUE_SAT - node_0_balance_sat;
-
-	let chan_id = create_chan_between_nodes_with_value(
-		&nodes[0],
-		&nodes[1],
-		CHANNEL_VALUE_SAT,
-		node_1_balance_sat * 1000,
-	)
-	.3;
-
-	{
-		// Double check the reserve that node 0 has to maintain here
-		let per_peer_state_lock;
-		let mut peer_state_lock;
-		let chan =
-			get_channel_ref!(nodes[1], nodes[0], per_peer_state_lock, peer_state_lock, chan_id);
-		assert_eq!(
-			chan.context().holder_selected_channel_reserve_satoshis,
-			channel_reserve_satoshis
-		);
-	}
-	{
-		// Double check the dust limit on node 0's commitment transactions; when node 0
-		// adds a HTLC, node 1 will check that the fee on node 0's commitment transaction
-		// does not dip under the node 1 selected reserve.
-		let per_peer_state_lock;
-		let mut peer_state_lock;
-		let chan =
-			get_channel_ref!(nodes[0], nodes[1], per_peer_state_lock, peer_state_lock, chan_id);
-		assert_eq!(chan.context().holder_dust_limit_satoshis, HTLC_AMT_SAT);
-	}
-
-	// Precompute the route to skip any router complaints when sending the last HTLC
-	let (route_0_1, payment_hash_0_1, _, payment_secret_0_1) =
-		get_route_and_payment_hash!(nodes[0], nodes[1], HTLC_AMT_SAT * 1000);
-
-	let mut htlcs = Vec::new();
-	for _ in 0..MIN_AFFORDABLE_HTLC_COUNT - 1 {
-		let (_payment_preimage, payment_hash, ..) =
-			route_payment(&nodes[0], &[&nodes[1]], HTLC_AMT_SAT * 1000);
-		// Grab a snapshot of these HTLCs to manually build the commitment transaction later...
-		let accepted_htlc = chan_utils::HTLCOutputInCommitment {
-			offered: false,
-			amount_msat: HTLC_AMT_SAT * 1000,
-			// Hard-coded to match the expected value
-			cltv_expiry: 81,
-			payment_hash,
-			transaction_output_index: None,
-		};
-		htlcs.push((accepted_htlc, ()));
-	}
-
-	// Need to manually create the update_add_htlc message to go around the channel reserve check in send_htlc()
-	let secp_ctx = Secp256k1::new();
-	let session_priv = SecretKey::from_slice(&[42; 32]).expect("RNG is bad!");
-
-	let cur_height = nodes[1].node.best_block.read().unwrap().height + 1;
-
-	let onion_keys =
-		onion_utils::construct_onion_keys(&secp_ctx, &route_0_1.paths[0], &session_priv).unwrap();
-	let recipient_onion_fields = RecipientOnionFields::secret_only(payment_secret_0_1);
-	let (onion_payloads, amount_msat, cltv_expiry) = onion_utils::build_onion_payloads(
-		&route_0_1.paths[0],
-		HTLC_AMT_SAT * 1000,
-		&recipient_onion_fields,
-		cur_height,
-		&None,
-		None,
-	)
-	.unwrap();
-	let onion_routing_packet =
-		onion_utils::construct_onion_packet(onion_payloads, onion_keys, [0; 32], &payment_hash_0_1)
-			.unwrap();
-	// Double check the hard-coded value
-	assert_eq!(cltv_expiry, 81);
-	let msg = msgs::UpdateAddHTLC {
-		channel_id: chan_id,
-		htlc_id: MIN_AFFORDABLE_HTLC_COUNT as u64 - 1,
-		amount_msat,
-		payment_hash: payment_hash_0_1,
-		cltv_expiry,
-		onion_routing_packet,
-		skimmed_fee_msat: None,
-		blinding_point: None,
-	};
-
-	nodes[1].node.handle_update_add_htlc(node_a_id, &msg);
-
-	if !can_afford {
-		let err = "Remote HTLC add would put them under remote reserve value".to_string();
-		nodes[1].logger.assert_log_contains("lightning::ln::channelmanager", &err, 3);
-		let events = nodes[1].node.get_and_clear_pending_msg_events();
-		assert_eq!(events.len(), 2);
-		let reason = ClosureReason::ProcessingError { err };
-		check_closed_event(&nodes[1], 1, reason, false, &[node_a_id], CHANNEL_VALUE_SAT);
-		check_added_monitors(&nodes[1], 1);
-	} else {
-		// Now manually create the commitment_signed message corresponding to the update_add
-		// nodes[0] just sent. In the code for construction of this message, "local" refers
-		// to the sender of the message, and "remote" refers to the receiver.
-
-		const INITIAL_COMMITMENT_NUMBER: u64 = (1 << 48) - 1;
-
-		let (local_secret, next_local_point) = {
-			let per_peer_lock;
-			let mut peer_state_lock;
-
-			let channel =
-				get_channel_ref!(nodes[0], nodes[1], per_peer_lock, peer_state_lock, chan_id);
-			let local_chan = if let ChannelPhase::Funded(chan) = &*channel {
-				chan
-			} else {
-				panic!();
-			};
-			let chan_signer = local_chan.get_signer();
-			// Make the signer believe we validated another commitment, so we can release the secret
-			chan_signer.as_ecdsa().unwrap().get_enforcement_state().last_holder_commitment -= 1;
-
-			(
-				chan_signer
-					.as_ref()
-					.release_commitment_secret(
-						INITIAL_COMMITMENT_NUMBER - MIN_AFFORDABLE_HTLC_COUNT as u64 + 1,
-					)
-					.unwrap(),
-				chan_signer
-					.as_ref()
-					.get_per_commitment_point(
-						INITIAL_COMMITMENT_NUMBER - MIN_AFFORDABLE_HTLC_COUNT as u64,
-						&secp_ctx,
-					)
-					.unwrap(),
-			)
-		};
-
-		// Build the remote commitment transaction so we can sign it, and then later use the
-		// signature for the commitment_signed message.
-		let local_chan_balance = node_0_balance_sat
-			- HTLC_AMT_SAT * MIN_AFFORDABLE_HTLC_COUNT as u64
-			- 2 * crate::ln::channel::ANCHOR_OUTPUT_VALUE_SATOSHI
-			- chan_utils::commit_tx_fee_sat(
-				FEERATE_PER_KW,
-				MIN_AFFORDABLE_HTLC_COUNT,
-				&channel_type,
-			);
-
-		let accepted_htlc_info = chan_utils::HTLCOutputInCommitment {
-			offered: false,
-			amount_msat: HTLC_AMT_SAT * 1000,
-			cltv_expiry,
-			payment_hash: payment_hash_0_1,
-			transaction_output_index: None,
-		};
-		htlcs.push((accepted_htlc_info, ()));
-
-		let commitment_number = INITIAL_COMMITMENT_NUMBER - MIN_AFFORDABLE_HTLC_COUNT as u64;
-
-		let res = {
-			let per_peer_lock;
-			let mut peer_state_lock;
-
-			let channel =
-				get_channel_ref!(nodes[0], nodes[1], per_peer_lock, peer_state_lock, chan_id);
-			let chan_signer = if let ChannelPhase::Funded(chan) = &*channel {
-				chan.get_signer()
-			} else {
-				panic!();
-			};
-
-			let commitment_tx = CommitmentTransaction::new_with_auxiliary_htlc_data(
-				commitment_number,
-				node_1_balance_sat,
-				local_chan_balance,
-				channel.context().channel_transaction_parameters.counterparty_parameters.as_ref().unwrap().pubkeys.funding_pubkey,
-				channel.context().channel_transaction_parameters.holder_pubkeys.funding_pubkey,
-				channel.context().build_remote_transaction_keys(),
-				FEERATE_PER_KW,
-				&mut htlcs,
-				&channel.context().channel_transaction_parameters.as_counterparty_broadcastable(),
-			);
-			chan_signer
-				.as_ecdsa()
-				.unwrap()
-				.sign_counterparty_commitment(
-					&commitment_tx,
-					Vec::new(),
-					Vec::new(),
-					&secp_ctx,
-				)
-				.unwrap()
-		};
-
-		let commit_signed_msg = msgs::CommitmentSigned {
-			channel_id: chan_id,
-			signature: res.0,
-			htlc_signatures: res.1,
-			batch: None,
-			#[cfg(taproot)]
-			partial_signature_with_nonce: None,
-		};
-
-		// Send the commitment_signed message to the nodes[1].
-		nodes[1].node.handle_commitment_signed(node_a_id, &commit_signed_msg);
-		let _ = nodes[1].node.get_and_clear_pending_msg_events();
-
-		// Send the RAA to nodes[1].
-		let raa_msg = msgs::RevokeAndACK {
-			channel_id: chan_id,
-			per_commitment_secret: local_secret,
-			next_per_commitment_point: next_local_point,
-			#[cfg(taproot)]
-			next_local_nonce: None,
-		};
-		nodes[1].node.handle_revoke_and_ack(node_a_id, &raa_msg);
-
-		// The HTLC actually fails here in `fn validate_commitment_signed` due to a fee spike buffer
-		// violation. It nonetheless passed all checks in `fn validate_update_add_htlc`.
-
-		//expect_pending_htlcs_forwardable!(nodes[1]);
-		expect_htlc_handling_failed_destinations!(
-			nodes[1].node.get_and_clear_pending_events(),
-			&[HTLCDestination::FailedPayment { payment_hash: payment_hash_0_1 }]
-		);
-
-		let events = nodes[1].node.get_and_clear_pending_msg_events();
-		assert_eq!(events.len(), 1);
-		// Make sure the HTLC failed in the way we expect.
-		match events[0] {
-			MessageSendEvent::UpdateHTLCs {
-				updates: msgs::CommitmentUpdate { ref update_fail_htlcs, .. },
-				..
-			} => {
-				assert_eq!(update_fail_htlcs.len(), 1);
-				update_fail_htlcs[0].clone()
-			},
-			_ => panic!("Unexpected event"),
-		};
-		nodes[1].logger.assert_log("lightning::ln::channel",
-			format!("Attempting to fail HTLC due to fee spike buffer violation in channel {}. Rebalancing is required.", raa_msg.channel_id), 1);
-
-		check_added_monitors(&nodes[1], 2);
-	}
 }
