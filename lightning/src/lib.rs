@@ -67,6 +67,8 @@ extern crate criterion;
 #[cfg(all(feature = "std", test))]
 extern crate parking_lot;
 
+#[cfg(all(feature = "std", test))] extern crate parking_lot;
+
 #[macro_use]
 pub mod util;
 
