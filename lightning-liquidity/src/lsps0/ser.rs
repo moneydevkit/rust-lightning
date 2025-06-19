@@ -21,6 +21,9 @@ use crate::lsps1::msgs::{
 use crate::lsps2::msgs::{
 	LSPS2Message, LSPS2Request, LSPS2Response, LSPS2_BUY_METHOD_NAME, LSPS2_GET_INFO_METHOD_NAME,
 };
+use crate::lsps4::msgs::{
+	LSPS4Message, LSPS4Request, LSPS4Response, LSPS4_REGISTER_NODE_METHOD_NAME,
+};
 use crate::lsps5::msgs::{
 	LSPS5Message, LSPS5Request, LSPS5Response, LSPS5_LIST_WEBHOOKS_METHOD_NAME,
 	LSPS5_REMOVE_WEBHOOK_METHOD_NAME, LSPS5_SET_WEBHOOK_METHOD_NAME,
@@ -66,6 +69,7 @@ pub(crate) enum LSPSMethod {
 	LSPS1CreateOrder,
 	LSPS2GetInfo,
 	LSPS2Buy,
+	LSPS4RegisterNode,
 	LSPS5SetWebhook,
 	LSPS5ListWebhooks,
 	LSPS5RemoveWebhook,
@@ -80,6 +84,7 @@ impl LSPSMethod {
 			Self::LSPS1GetOrder => LSPS1_GET_ORDER_METHOD_NAME,
 			Self::LSPS2GetInfo => LSPS2_GET_INFO_METHOD_NAME,
 			Self::LSPS2Buy => LSPS2_BUY_METHOD_NAME,
+			Self::LSPS4RegisterNode => LSPS4_REGISTER_NODE_METHOD_NAME,
 			Self::LSPS5SetWebhook => LSPS5_SET_WEBHOOK_METHOD_NAME,
 			Self::LSPS5ListWebhooks => LSPS5_LIST_WEBHOOKS_METHOD_NAME,
 			Self::LSPS5RemoveWebhook => LSPS5_REMOVE_WEBHOOK_METHOD_NAME,
@@ -97,6 +102,7 @@ impl FromStr for LSPSMethod {
 			LSPS1_GET_ORDER_METHOD_NAME => Ok(Self::LSPS1GetOrder),
 			LSPS2_GET_INFO_METHOD_NAME => Ok(Self::LSPS2GetInfo),
 			LSPS2_BUY_METHOD_NAME => Ok(Self::LSPS2Buy),
+			LSPS4_REGISTER_NODE_METHOD_NAME => Ok(Self::LSPS4RegisterNode),
 			LSPS5_SET_WEBHOOK_METHOD_NAME => Ok(Self::LSPS5SetWebhook),
 			LSPS5_LIST_WEBHOOKS_METHOD_NAME => Ok(Self::LSPS5ListWebhooks),
 			LSPS5_REMOVE_WEBHOOK_METHOD_NAME => Ok(Self::LSPS5RemoveWebhook),
@@ -128,6 +134,14 @@ impl From<&LSPS2Request> for LSPSMethod {
 		match value {
 			LSPS2Request::GetInfo(_) => Self::LSPS2GetInfo,
 			LSPS2Request::Buy(_) => Self::LSPS2Buy,
+		}
+	}
+}
+
+impl From<&LSPS4Request> for LSPSMethod {
+	fn from(value: &LSPS4Request) -> Self {
+		match value {
+			LSPS4Request::RegisterNode(_) => Self::LSPS4RegisterNode,
 		}
 	}
 }
@@ -324,6 +338,8 @@ pub enum LSPSMessage {
 	LSPS1(LSPS1Message),
 	/// An LSPS2 message.
 	LSPS2(LSPS2Message),
+	/// An LSPS4 message.
+	LSPS4(LSPS4Message),
 	/// An LSPS5 message.
 	LSPS5(LSPS5Message),
 }
@@ -351,6 +367,9 @@ impl LSPSMessage {
 				Some((LSPSRequestId(request_id.0.clone()), request.into()))
 			},
 			LSPSMessage::LSPS2(LSPS2Message::Request(request_id, request)) => {
+				Some((LSPSRequestId(request_id.0.clone()), request.into()))
+			},
+			LSPSMessage::LSPS4(LSPS4Message::Request(request_id, request)) => {
 				Some((LSPSRequestId(request_id.0.clone()), request.into()))
 			},
 			LSPSMessage::LSPS5(LSPS5Message::Request(request_id, request)) => {
@@ -465,6 +484,26 @@ impl Serialize for LSPSMessage {
 					},
 					LSPS2Response::BuyError(error) => {
 						jsonrpc_object.serialize_field(JSONRPC_ERROR_FIELD_KEY, error)?
+					},
+				}
+			},
+			LSPSMessage::LSPS4(LSPS4Message::Request(request_id, request)) => {
+				jsonrpc_object.serialize_field(JSONRPC_ID_FIELD_KEY, &request_id.0)?;
+				jsonrpc_object
+					.serialize_field(JSONRPC_METHOD_FIELD_KEY, &LSPSMethod::from(request))?;
+
+				match request {
+					LSPS4Request::RegisterNode(params) => {
+						jsonrpc_object.serialize_field(JSONRPC_PARAMS_FIELD_KEY, params)?
+					},
+				}
+			},
+			LSPSMessage::LSPS4(LSPS4Message::Response(request_id, response)) => {
+				jsonrpc_object.serialize_field(JSONRPC_ID_FIELD_KEY, &request_id.0)?;
+
+				match response {
+					LSPS4Response::RegisterNode(result) => {
+						jsonrpc_object.serialize_field(JSONRPC_RESULT_FIELD_KEY, result)?
 					},
 				}
 			},
@@ -623,6 +662,11 @@ impl<'de, 'a> Visitor<'de> for LSPSMessageVisitor<'a> {
 						.map_err(de::Error::custom)?;
 					Ok(LSPSMessage::LSPS2(LSPS2Message::Request(id, LSPS2Request::Buy(request))))
 				},
+				LSPSMethod::LSPS4RegisterNode => {
+					let request = serde_json::from_value(params.unwrap_or(json!({})))
+						.map_err(de::Error::custom)?;
+					Ok(LSPSMessage::LSPS4(LSPS4Message::Request(id, LSPS4Request::RegisterNode(request))))
+				},
 				LSPSMethod::LSPS5SetWebhook => {
 					let request = serde_json::from_value(params.unwrap_or(json!({})))
 						.map_err(de::Error::custom)?;
@@ -747,6 +791,18 @@ impl<'de, 'a> Visitor<'de> for LSPSMessageVisitor<'a> {
 							Ok(LSPSMessage::LSPS2(LSPS2Message::Response(
 								id,
 								LSPS2Response::Buy(response),
+							)))
+						} else {
+							Err(de::Error::custom("Received invalid JSON-RPC object: one of method, result, or error required"))
+						}
+					},
+					LSPSMethod::LSPS4RegisterNode => {
+						if let Some(result) = result {
+							let response =
+								serde_json::from_value(result).map_err(de::Error::custom)?;
+							Ok(LSPSMessage::LSPS4(LSPS4Message::Response(
+								id,
+								LSPS4Response::RegisterNode(response),
 							)))
 						} else {
 							Err(de::Error::custom("Received invalid JSON-RPC object: one of method, result, or error required"))
