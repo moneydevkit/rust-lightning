@@ -64,6 +64,7 @@ pub mod events;
 pub mod lsps0;
 pub mod lsps1;
 pub mod lsps2;
+pub mod lsps4;
 mod manager;
 pub mod message_queue;
 #[allow(dead_code)]

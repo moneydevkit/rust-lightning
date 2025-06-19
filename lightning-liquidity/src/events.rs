@@ -18,6 +18,7 @@
 use crate::lsps0;
 use crate::lsps1;
 use crate::lsps2;
+use crate::lsps4;
 use crate::prelude::{Vec, VecDeque};
 use crate::sync::{Arc, Mutex};
 
@@ -114,6 +115,10 @@ pub enum Event {
 	LSPS2Client(lsps2::event::LSPS2ClientEvent),
 	/// An LSPS2 (JIT Channel) server event.
 	LSPS2Service(lsps2::event::LSPS2ServiceEvent),
+	/// An LSPS4 (Liquidity) client event.
+	LSPS4Client(lsps4::event::LSPS4ClientEvent),
+	/// An LSPS4 (Liquidity) server event.
+	LSPS4Service(lsps4::event::LSPS4ServiceEvent),
 }
 
 struct EventFuture {
