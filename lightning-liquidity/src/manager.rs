@@ -17,6 +17,11 @@ use crate::lsps1::service::{LSPS1ServiceConfig, LSPS1ServiceHandler};
 use crate::lsps2::client::{LSPS2ClientConfig, LSPS2ClientHandler};
 use crate::lsps2::msgs::LSPS2Message;
 use crate::lsps2::service::{LSPS2ServiceConfig, LSPS2ServiceHandler};
+
+use crate::lsps4::client::{LSPS4ClientConfig, LSPS4ClientHandler};
+use crate::lsps4::msgs::LSPS4Message;
+use crate::lsps4::service::{LSPS4ServiceConfig, LSPS4ServiceHandler};
+
 use crate::prelude::{new_hash_map, new_hash_set, Box, HashMap, HashSet, ToString, Vec};
 use crate::sync::{Arc, Mutex, RwLock};
 
@@ -26,7 +31,8 @@ use lightning::ln::msgs::{ErrorAction, LightningError};
 use lightning::ln::peer_handler::CustomMessageHandler;
 use lightning::ln::wire::CustomMessageReader;
 use lightning::sign::EntropySource;
-use lightning::util::logger::Level;
+use lightning::util::logger::{Level, Logger};
+use lightning::util::persist::KVStore;
 use lightning::util::ser::Readable;
 
 use lightning_types::features::{InitFeatures, NodeFeatures};
@@ -48,6 +54,8 @@ pub struct LiquidityServiceConfig {
 	/// Optional server-side configuration for JIT channels
 	/// should you want to support them.
 	pub lsps2_service_config: Option<LSPS2ServiceConfig>,
+	/// Optional server-side configuration for LSPS4 channels.
+	pub lsps4_service_config: Option<LSPS4ServiceConfig>,
 	/// Controls whether the liquidity service should be advertised via setting the feature bit in
 	/// node announcment and the init message.
 	pub advertise_service: bool,
@@ -62,6 +70,8 @@ pub struct LiquidityClientConfig {
 	pub lsps1_client_config: Option<LSPS1ClientConfig>,
 	/// Optional client-side configuration for JIT channels.
 	pub lsps2_client_config: Option<LSPS2ClientConfig>,
+	/// Optional client-side configuration for LSPS4 channels.
+	pub lsps4_client_config: Option<LSPS4ClientConfig>,
 }
 
 /// The main interface into LSP functionality.
@@ -87,11 +97,13 @@ pub struct LiquidityClientConfig {
 /// [`Event::ChannelReady`]: lightning::events::Event::ChannelReady
 /// [`Event::HTLCHandlingFailed`]: lightning::events::Event::HTLCHandlingFailed
 /// [`Event::PaymentForwarded`]: lightning::events::Event::PaymentForwarded
-pub struct LiquidityManager<ES: Deref + Clone, CM: Deref + Clone, C: Deref + Clone>
+pub struct LiquidityManager<ES: Deref + Clone, CM: Deref + Clone, C: Deref + Clone, KV: Deref + Clone, L: Deref + Clone>
 where
 	ES::Target: EntropySource,
 	CM::Target: AChannelManager,
 	C::Target: Filter,
+	KV::Target: KVStore,
+	L::Target: Logger,
 {
 	pending_messages: Arc<MessageQueue>,
 	pending_events: Arc<EventQueue>,
@@ -105,17 +117,21 @@ where
 	lsps1_client_handler: Option<LSPS1ClientHandler<ES>>,
 	lsps2_service_handler: Option<LSPS2ServiceHandler<CM>>,
 	lsps2_client_handler: Option<LSPS2ClientHandler<ES>>,
+	lsps4_service_handler: Option<LSPS4ServiceHandler<CM, KV, L>>,
+	lsps4_client_handler: Option<LSPS4ClientHandler<ES>>,
 	service_config: Option<LiquidityServiceConfig>,
 	_client_config: Option<LiquidityClientConfig>,
 	best_block: RwLock<Option<BestBlock>>,
 	_chain_source: Option<C>,
 }
 
-impl<ES: Deref + Clone, CM: Deref + Clone, C: Deref + Clone> LiquidityManager<ES, CM, C>
+impl<ES: Deref + Clone, CM: Deref + Clone, C: Deref + Clone, KV: Deref + Clone, L: Deref + Clone> LiquidityManager<ES, CM, C, KV, L>
 where
 	ES::Target: EntropySource,
 	CM::Target: AChannelManager,
 	C::Target: Filter,
+	KV::Target: KVStore,
+	L::Target: Logger,
 {
 	/// Constructor for the [`LiquidityManager`].
 	///
@@ -124,7 +140,7 @@ where
 	pub fn new(
 		entropy_source: ES, channel_manager: CM, chain_source: Option<C>,
 		chain_params: Option<ChainParameters>, service_config: Option<LiquidityServiceConfig>,
-		client_config: Option<LiquidityClientConfig>,
+		client_config: Option<LiquidityClientConfig>, kv_store: KV, logger: L,
 	) -> Self
 where {
 		let pending_messages = Arc::new(MessageQueue::new());
@@ -155,6 +171,34 @@ where {
 					Arc::clone(&pending_events),
 					channel_manager.clone(),
 					config.clone(),
+				)
+			})
+		});
+
+		let lsps4_client_handler = client_config.as_ref().and_then(|config| {
+			config.lsps4_client_config.map(|config| {
+				LSPS4ClientHandler::new(
+					entropy_source.clone(),
+					Arc::clone(&pending_messages),
+					Arc::clone(&pending_events),
+					config.clone(),
+				)
+			})
+		});
+		let lsps4_service_handler = service_config.as_ref().and_then(|config| {
+			config.lsps4_service_config.as_ref().map(|config| {
+				if let Some(number) =
+					<LSPS4ServiceHandler<CM, KV, L> as ProtocolMessageHandler>::PROTOCOL_NUMBER
+				{
+					supported_protocols.push(number);
+				}
+				LSPS4ServiceHandler::new(
+					Arc::clone(&pending_messages),
+					Arc::clone(&pending_events),
+					channel_manager.clone(),
+					config.clone(),
+					kv_store.clone(),
+					logger.clone(),
 				)
 			})
 		});
@@ -213,6 +257,8 @@ where {
 			lsps1_service_handler,
 			lsps2_client_handler,
 			lsps2_service_handler,
+			lsps4_client_handler,
+			lsps4_service_handler,
 			service_config,
 			_client_config: client_config,
 			best_block: RwLock::new(chain_params.map(|chain_params| chain_params.best_block)),
@@ -258,6 +304,22 @@ where {
 	/// The returned hendler allows to initiate the LSPS2 service-side flow.
 	pub fn lsps2_service_handler(&self) -> Option<&LSPS2ServiceHandler<CM>> {
 		self.lsps2_service_handler.as_ref()
+	}
+
+	/// Returns a reference to the LSPS4 client-side handler.
+	///
+	/// The returned hendler allows to initiate the LSPS4 client-side flow. That is, it allows to
+	/// retrieve all necessary data to create 'just-in-time' invoices that, when paid, will have
+	/// the configured LSP open a 'just-in-time' channel.
+	pub fn lsps4_client_handler(&self) -> Option<&LSPS4ClientHandler<ES>> {
+		self.lsps4_client_handler.as_ref()
+	}
+
+	/// Returns a reference to the LSPS4 server-side handler.
+	///
+	/// The returned hendler allows to initiate the LSPS4 service-side flow.
+	pub fn lsps4_service_handler(&self) -> Option<&LSPS4ServiceHandler<CM, KV, L>> {
+		self.lsps4_service_handler.as_ref()
 	}
 
 	/// Allows to set a callback that will be called after new messages are pushed to the message
@@ -435,17 +497,39 @@ where {
 					},
 				}
 			},
+			LSPSMessage::LSPS4(msg @ LSPS4Message::Response(..)) => {
+				match &self.lsps4_client_handler {
+					Some(lsps4_client_handler) => {
+						lsps4_client_handler.handle_message(msg, sender_node_id)?;
+					},
+					None => {
+						return Err(LightningError { err: format!("Received LSPS4 response message without LSPS4 client handler configured. From node = {:?}", sender_node_id), action: ErrorAction::IgnoreAndLog(Level::Info)});
+					},
+				}
+			},
+			LSPSMessage::LSPS4(msg @ LSPS4Message::Request(..)) => {
+				match &self.lsps4_service_handler {
+					Some(lsps4_service_handler) => {
+						lsps4_service_handler.handle_message(msg, sender_node_id)?;
+					},
+					None => {
+						return Err(LightningError { err: format!("Received LSPS4 request message without LSPS4 service handler configured. From node = {:?}", sender_node_id), action: ErrorAction::IgnoreAndLog(Level::Info)});
+					},
+				}
+			},
 		}
 		Ok(())
 	}
 }
 
-impl<ES: Deref + Clone + Clone, CM: Deref + Clone, C: Deref + Clone> CustomMessageReader
-	for LiquidityManager<ES, CM, C>
+impl<ES: Deref + Clone + Clone, CM: Deref + Clone, C: Deref + Clone, KV: Deref + Clone, L: Deref + Clone> CustomMessageReader
+	for LiquidityManager<ES, CM, C, KV, L>
 where
 	ES::Target: EntropySource,
 	CM::Target: AChannelManager,
 	C::Target: Filter,
+	KV::Target: KVStore,
+	L::Target: Logger,
 {
 	type CustomMessage = RawLSPSMessage;
 
@@ -459,12 +543,14 @@ where
 	}
 }
 
-impl<ES: Deref + Clone, CM: Deref + Clone, C: Deref + Clone> CustomMessageHandler
-	for LiquidityManager<ES, CM, C>
+impl<ES: Deref + Clone, CM: Deref + Clone, C: Deref + Clone, KV: Deref + Clone, L: Deref + Clone> CustomMessageHandler
+	for LiquidityManager<ES, CM, C, KV, L>
 where
 	ES::Target: EntropySource,
 	CM::Target: AChannelManager,
 	C::Target: Filter,
+	KV::Target: KVStore,
+	L::Target: Logger,
 {
 	fn handle_custom_message(
 		&self, msg: Self::CustomMessage, sender_node_id: PublicKey,
@@ -563,19 +649,31 @@ where
 		if let Some(lsps2_service_handler) = self.lsps2_service_handler.as_ref() {
 			lsps2_service_handler.peer_disconnected(counterparty_node_id);
 		}
+
+		if let Some(lsps4_service_handler) = self.lsps4_service_handler.as_ref() {
+			lsps4_service_handler.peer_disconnected(&counterparty_node_id);
+		}
 	}
+
 	fn peer_connected(
-		&self, _: bitcoin::secp256k1::PublicKey, _: &lightning::ln::msgs::Init, _: bool,
+		&self, counterparty_node_id: bitcoin::secp256k1::PublicKey, _: &lightning::ln::msgs::Init, _: bool,
 	) -> Result<(), ()> {
+
+		if let Some(lsps4_service_handler) = self.lsps4_service_handler.as_ref() {
+			lsps4_service_handler.peer_connected(counterparty_node_id);
+		}
+
 		Ok(())
 	}
 }
 
-impl<ES: Deref + Clone, CM: Deref + Clone, C: Deref + Clone> Listen for LiquidityManager<ES, CM, C>
+impl<ES: Deref + Clone, CM: Deref + Clone, C: Deref + Clone, KV: Deref + Clone, L: Deref + Clone> Listen for LiquidityManager<ES, CM, C, KV, L>
 where
 	ES::Target: EntropySource,
 	CM::Target: AChannelManager,
 	C::Target: Filter,
+	KV::Target: KVStore,
+	L::Target: Logger,
 {
 	fn filtered_block_connected(
 		&self, header: &bitcoin::block::Header, txdata: &chain::transaction::TransactionData,
@@ -608,11 +706,13 @@ where
 	}
 }
 
-impl<ES: Deref + Clone, CM: Deref + Clone, C: Deref + Clone> Confirm for LiquidityManager<ES, CM, C>
+impl<ES: Deref + Clone, CM: Deref + Clone, C: Deref + Clone, KV: Deref + Clone, L: Deref + Clone> Confirm for LiquidityManager<ES, CM, C, KV, L>
 where
 	ES::Target: EntropySource,
 	CM::Target: AChannelManager,
 	C::Target: Filter,
+	KV::Target: KVStore,
+	L::Target: Logger,
 {
 	fn transactions_confirmed(
 		&self, _header: &bitcoin::block::Header, _txdata: &chain::transaction::TransactionData,

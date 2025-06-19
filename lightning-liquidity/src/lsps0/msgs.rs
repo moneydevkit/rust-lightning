@@ -78,6 +78,7 @@ impl TryFrom<LSPSMessage> for LSPS0Message {
 			LSPSMessage::LSPS0(message) => Ok(message),
 			LSPSMessage::LSPS1(_) => Err(()),
 			LSPSMessage::LSPS2(_) => Err(()),
+			LSPSMessage::LSPS4(_) => Err(()),
 		}
 	}
 }
