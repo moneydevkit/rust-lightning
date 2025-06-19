@@ -795,6 +795,26 @@ where
 					},
 				}
 			},
+			LSPSMessage::LSPS4(msg @ LSPS4Message::Response(..)) => {
+				match &self.lsps4_client_handler {
+					Some(lsps4_client_handler) => {
+						lsps4_client_handler.handle_message(msg, sender_node_id)?;
+					},
+					None => {
+						return Err(LightningError { err: format!("Received LSPS4 response message without LSPS4 client handler configured. From node = {:?}", sender_node_id), action: ErrorAction::IgnoreAndLog(Level::Info)});
+					},
+				}
+			},
+			LSPSMessage::LSPS4(msg @ LSPS4Message::Request(..)) => {
+				match &self.lsps4_service_handler {
+					Some(lsps4_service_handler) => {
+						lsps4_service_handler.handle_message(msg, sender_node_id)?;
+					},
+					None => {
+						return Err(LightningError { err: format!("Received LSPS4 request message without LSPS4 service handler configured. From node = {:?}", sender_node_id), action: ErrorAction::IgnoreAndLog(Level::Info)});
+					},
+				}
+			},
 		}
 		Ok(())
 	}
@@ -954,6 +974,7 @@ where
 			lsps5_service_handler.peer_disconnected(&counterparty_node_id);
 		}
 	}
+
 	fn peer_connected(
 		&self, counterparty_node_id: bitcoin::secp256k1::PublicKey, _: &lightning::ln::msgs::Init,
 		_: bool,

@@ -356,6 +356,9 @@ impl LSPSMessage {
 			LSPSMessage::LSPS5(LSPS5Message::Request(request_id, request)) => {
 				Some((LSPSRequestId(request_id.0.clone()), request.into()))
 			},
+			LSPSMessage::LSPS4(LSPS4Message::Request(request_id, request)) => {
+				Some((RequestId(request_id.0.clone()), request.into()))
+			},
 			_ => None,
 		}
 	}
@@ -465,6 +468,26 @@ impl Serialize for LSPSMessage {
 					},
 					LSPS2Response::BuyError(error) => {
 						jsonrpc_object.serialize_field(JSONRPC_ERROR_FIELD_KEY, error)?
+					},
+				}
+			},
+			LSPSMessage::LSPS4(LSPS4Message::Request(request_id, request)) => {
+				jsonrpc_object.serialize_field(JSONRPC_ID_FIELD_KEY, &request_id.0)?;
+				jsonrpc_object
+					.serialize_field(JSONRPC_METHOD_FIELD_KEY, &LSPSMethod::from(request))?;
+
+				match request {
+					LSPS4Request::RegisterNode(params) => {
+						jsonrpc_object.serialize_field(JSONRPC_PARAMS_FIELD_KEY, params)?
+					},
+				}
+			},
+			LSPSMessage::LSPS4(LSPS4Message::Response(request_id, response)) => {
+				jsonrpc_object.serialize_field(JSONRPC_ID_FIELD_KEY, &request_id.0)?;
+
+				match response {
+					LSPS4Response::RegisterNode(result) => {
+						jsonrpc_object.serialize_field(JSONRPC_RESULT_FIELD_KEY, result)?
 					},
 				}
 			},
