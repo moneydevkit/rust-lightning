@@ -23,6 +23,7 @@ pub(crate) use event_queue::{EventQueue, EventQueueDeserWrapper};
 use crate::lsps0;
 use crate::lsps1;
 use crate::lsps2;
+use crate::lsps4;
 use crate::lsps5;
 
 /// An event which you should probably take some action in response to.
@@ -39,6 +40,10 @@ pub enum LiquidityEvent {
 	LSPS2Client(lsps2::event::LSPS2ClientEvent),
 	/// An LSPS2 (JIT Channel) server event.
 	LSPS2Service(lsps2::event::LSPS2ServiceEvent),
+	/// An LSPS4 (Liquidity) client event.
+	LSPS4Client(lsps4::event::LSPS4ClientEvent),
+	/// An LSPS4 (Liquidity) server event.
+	LSPS4Service(lsps4::event::LSPS4ServiceEvent),
 	/// An LSPS5 (Webhook) client event.
 	LSPS5Client(lsps5::event::LSPS5ClientEvent),
 	/// An LSPS5 (Webhook) server event.
@@ -73,6 +78,18 @@ impl From<lsps2::event::LSPS2ClientEvent> for LiquidityEvent {
 impl From<lsps2::event::LSPS2ServiceEvent> for LiquidityEvent {
 	fn from(event: lsps2::event::LSPS2ServiceEvent) -> Self {
 		Self::LSPS2Service(event)
+	}
+}
+
+impl From<lsps4::event::LSPS4ClientEvent> for LiquidityEvent {
+	fn from(event: lsps4::event::LSPS4ClientEvent) -> Self {
+		Self::LSPS4Client(event)
+	}
+}
+
+impl From<lsps4::event::LSPS4ServiceEvent> for LiquidityEvent {
+	fn from(event: lsps4::event::LSPS4ServiceEvent) -> Self {
+		Self::LSPS4Service(event)
 	}
 }
 

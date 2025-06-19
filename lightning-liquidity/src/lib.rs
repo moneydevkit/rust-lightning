@@ -62,6 +62,7 @@ pub mod events;
 pub mod lsps0;
 pub mod lsps1;
 pub mod lsps2;
+pub mod lsps4;
 pub mod lsps5;
 mod manager;
 pub mod message_queue;

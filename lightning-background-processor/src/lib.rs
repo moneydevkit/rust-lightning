@@ -465,6 +465,8 @@ pub const NO_LIQUIDITY_MANAGER_SYNC: Option<
 				                           + Send
 				                           + Sync,
 				T = &(dyn BroadcasterInterface + Send + Sync),
+				Logger = dyn lightning::util::logger::Logger + Send + Sync,
+				L = &(dyn lightning::util::logger::Logger + Send + Sync),
 			> + Send
 			+ Sync,
 	>,
