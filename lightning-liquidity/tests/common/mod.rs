@@ -127,13 +127,15 @@ pub(crate) struct Node {
 					Arc<KeysManager>,
 					Arc<ChannelManager>,
 					Arc<dyn Filter + Send + Sync>,
+					Arc<FilesystemStore>,
+					Arc<test_utils::TestLogger>,
 				>,
 			>,
 			Arc<KeysManager>,
 		>,
 	>,
 	pub(crate) liquidity_manager:
-		Arc<LiquidityManager<Arc<KeysManager>, Arc<ChannelManager>, Arc<dyn Filter + Send + Sync>>>,
+		Arc<LiquidityManager<Arc<KeysManager>, Arc<ChannelManager>, Arc<dyn Filter + Send + Sync>, Arc<FilesystemStore>, Arc<test_utils::TestLogger>>>,
 	pub(crate) check_msgs_processed: Arc<AtomicBool>,
 	pub(crate) chain_monitor: Arc<ChainMonitor>,
 	pub(crate) kv_store: Arc<FilesystemStore>,
@@ -460,6 +462,8 @@ pub(crate) fn create_liquidity_node(
 		Some(chain_params),
 		service_config,
 		client_config,
+		kv_store.clone(),
+		logger.clone(),
 	));
 	let msg_handler = MessageHandler {
 		chan_handler: Arc::new(test_utils::TestChannelMessageHandler::new(
