@@ -2018,6 +2018,8 @@ fn do_test_commitment_revoked_fail_backward_exhaustive(
 		check_added_monitors(&nodes[1], 2);
 	} else {
 		check_added_monitors(&nodes[1], 1);
+	} else {
+		check_added_monitors(&nodes[1], 0);
 	}
 	assert_eq!(events.len(), if deliver_bs_raa { 3 + nodes.len() - 1 } else { 3 + nodes.len() });
 	assert!(events.iter().any(|ev| matches!(
