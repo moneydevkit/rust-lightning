@@ -11,8 +11,8 @@
 
 pub mod client;
 pub mod event;
-pub mod msgs;
 pub(crate) mod htlc_store;
+pub mod msgs;
 pub(crate) mod scid_store;
 pub mod service;
 pub mod utils;
