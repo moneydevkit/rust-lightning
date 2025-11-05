@@ -4,10 +4,11 @@ use std::fmt::Write;
 /// Computes the forward fee given a payment size and the fee parameters.
 ///
 /// Returns [`Option::None`] when the computation overflows.
-pub fn compute_forward_fee(
-	payment_size_msat: u64, fee_proportional: u64,
-) -> Option<u64> {
-	payment_size_msat.checked_mul(fee_proportional).and_then(|f| f.checked_add(999999)).and_then(|f| f.checked_div(1000000))
+pub fn compute_forward_fee(payment_size_msat: u64, fee_proportional: u64) -> Option<u64> {
+	payment_size_msat
+		.checked_mul(fee_proportional)
+		.and_then(|f| f.checked_add(999999))
+		.and_then(|f| f.checked_div(1000000))
 }
 
 /// Convert a byte slice to a hex string.
