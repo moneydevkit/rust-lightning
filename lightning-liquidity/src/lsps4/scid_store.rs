@@ -7,29 +7,23 @@
 
 use lightning::util::ser::{Readable, Writeable};
 use lightning::{impl_writeable_tlv_based, log_error};
-use lightning::ln::channelmanager::InterceptId;
-use lightning::ln::types::ChannelId;
 
 use lightning::util::logger::Logger;
 use lightning::util::persist::KVStore;
-use lightning_types::payment::PaymentHash;
 
 use bitcoin::secp256k1::PublicKey;
 
 use lightning::io::{self, Cursor};
 
+use crate::sync::RwLock;
 use std::collections::HashMap;
 use std::ops::Deref;
-use std::time::{SystemTime, UNIX_EPOCH};
-use crate::sync::{Arc, Mutex, MutexGuard, RwLock};
-
 
 use crate::lsps4::utils;
 
 /// The Intercepted HTLC store information will be persisted under this key.
 pub(crate) const INTERCEPT_SCID_STORE_PERSISTENCE_PRIMARY_NAMESPACE: &str = "intercept_scids";
 pub(crate) const INTERCEPT_SCID_STORE_PERSISTENCE_SECONDARY_NAMESPACE: &str = "";
-
 
 /// Represents an intercepted HTLC that is stored in the data store
 #[derive(Clone, Debug, PartialEq)]
@@ -39,13 +33,8 @@ pub struct ScidWithPeer {
 }
 
 impl ScidWithPeer {
-	pub fn new(
-		scid: u64, peer_id: PublicKey,
-	) -> Self {
-		Self {
-			scid,
-			peer_id,
-		}
+	pub fn new(scid: u64, peer_id: PublicKey) -> Self {
+		Self { scid, peer_id }
 	}
 
 	pub fn store_key(&self) -> String {
@@ -67,18 +56,22 @@ impl_writeable_tlv_based!(ScidWithPeer, {
 });
 
 pub struct ScidStore<L: Deref, KV: Deref + Clone>
-where L::Target: Logger, KV::Target: KVStore {
+where
+	L::Target: Logger,
+	KV::Target: KVStore,
+{
 	peer_by_scid: RwLock<HashMap<u64, PublicKey>>,
 	scid_by_peer: RwLock<HashMap<PublicKey, u64>>,
 	kv_store: KV,
-	logger: L
+	logger: L,
 }
 
 impl<L: Deref, KV: Deref + Clone> ScidStore<L, KV>
-where L::Target: Logger, KV::Target: KVStore {
-	pub(crate) fn new(
-		kv_store: KV, logger: L,
-	) -> Result<Self, io::Error> {
+where
+	L::Target: Logger,
+	KV::Target: KVStore,
+{
+	pub(crate) fn new(kv_store: KV, logger: L) -> Result<Self, io::Error> {
 		let mut scids = Vec::new();
 
 		for stored_key in kv_store.list(
@@ -100,11 +93,13 @@ where L::Target: Logger, KV::Target: KVStore {
 			scids.push(scid);
 		}
 
-		let peer_by_scid =
-			RwLock::new(HashMap::from_iter(scids.iter().map(|obj| (obj.scid(),obj.peer_id().clone()))));
+		let peer_by_scid = RwLock::new(HashMap::from_iter(
+			scids.iter().map(|obj| (obj.scid(), obj.peer_id().clone())),
+		));
 
-		let scid_by_peer =
-			RwLock::new(HashMap::from_iter(scids.iter().map(|obj| (obj.peer_id().clone(), obj.scid()))));
+		let scid_by_peer = RwLock::new(HashMap::from_iter(
+			scids.iter().map(|obj| (obj.peer_id().clone(), obj.scid())),
+		));
 
 		Ok(Self { peer_by_scid, scid_by_peer, kv_store, logger })
 	}
@@ -128,7 +123,12 @@ where L::Target: Logger, KV::Target: KVStore {
 			locked_scid_by_peer.remove(&peer_id);
 			let store_key = utils::to_string(&scid.to_be_bytes());
 			self.kv_store
-				.remove(INTERCEPT_SCID_STORE_PERSISTENCE_PRIMARY_NAMESPACE, INTERCEPT_SCID_STORE_PERSISTENCE_SECONDARY_NAMESPACE, &store_key, false)
+				.remove(
+					INTERCEPT_SCID_STORE_PERSISTENCE_PRIMARY_NAMESPACE,
+					INTERCEPT_SCID_STORE_PERSISTENCE_SECONDARY_NAMESPACE,
+					&store_key,
+					false,
+				)
 				.map_err(|e| {
 					log_error!(
 						self.logger,
@@ -146,26 +146,21 @@ where L::Target: Logger, KV::Target: KVStore {
 		let store_key = scid.store_key();
 		let data = scid.encode();
 		self.kv_store
-			.write(INTERCEPT_SCID_STORE_PERSISTENCE_PRIMARY_NAMESPACE, INTERCEPT_SCID_STORE_PERSISTENCE_SECONDARY_NAMESPACE, &store_key, &data)
+			.write(
+				INTERCEPT_SCID_STORE_PERSISTENCE_PRIMARY_NAMESPACE,
+				INTERCEPT_SCID_STORE_PERSISTENCE_SECONDARY_NAMESPACE,
+				&store_key,
+				&data,
+			)
 			.map_err(|e| {
-				log_error!(
-					self.logger,
-					"Write for key {} failed due to: {}",
-					store_key,
-					e
-				);
+				log_error!(self.logger, "Write for key {} failed due to: {}", store_key, e);
 				e
 			})?;
 		Ok(())
 	}
 
-	pub fn add_intercepted_scid(
-		&self, scid: u64, peer_id: PublicKey,
-	) -> Result<bool, io::Error> {
-		let scid = ScidWithPeer::new(
-			scid,
-			peer_id,
-		);
+	pub fn add_intercepted_scid(&self, scid: u64, peer_id: PublicKey) -> Result<bool, io::Error> {
+		let scid = ScidWithPeer::new(scid, peer_id);
 		self.insert(scid)
 	}
 

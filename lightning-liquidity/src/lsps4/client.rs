@@ -9,10 +9,10 @@
 //! Contains the main LSPS4 client object, [`LSPS4ClientHandler`].
 
 use crate::events::{Event, EventQueue};
-use crate::lsps0::ser::{ProtocolMessageHandler, RequestId, ResponseError};
+use crate::lsps0::ser::{ProtocolMessageHandler, RequestId};
 use crate::lsps4::event::LSPS4ClientEvent;
 use crate::message_queue::MessageQueue;
-use crate::prelude::{new_hash_map, new_hash_set, HashMap, HashSet, String, ToString};
+use crate::prelude::{new_hash_map, new_hash_set, HashMap, HashSet, ToString};
 use crate::sync::{Arc, Mutex, RwLock};
 
 use lightning::ln::msgs::{ErrorAction, LightningError};
@@ -26,8 +26,7 @@ use core::default::Default;
 use core::ops::Deref;
 
 use crate::lsps4::msgs::{
-	RegisterNodeRequest, RegisterNodeResponse, LSPS4Message, LSPS4Request,
-	LSPS4Response,
+	LSPS4Message, LSPS4Request, LSPS4Response, RegisterNodeRequest, RegisterNodeResponse,
 };
 
 /// Client-side configuration options for JIT channels.
@@ -80,9 +79,7 @@ where
 	/// The user will receive the LSP's response via an [`InvoiceParametersReady`] event.
 	///
 	/// [`InvoiceParametersReady`]: crate::lsps4::event::LSPS4ClientEvent::InvoiceParametersReady
-	pub fn register_node(
-		&self, counterparty_node_id: PublicKey
-	) -> Result<RequestId, APIError> {
+	pub fn register_node(&self, counterparty_node_id: PublicKey) -> Result<RequestId, APIError> {
 		let request_id = crate::utils::generate_request_id(&self.entropy_source);
 
 		{
@@ -92,10 +89,7 @@ where
 				.or_insert(Mutex::new(PeerState::new()));
 			let mut peer_state_lock = inner_state_lock.lock().unwrap();
 
-			if !peer_state_lock
-				.pending_register_node_requests
-				.insert(request_id.clone())
-			{
+			if !peer_state_lock.pending_register_node_requests.insert(request_id.clone()) {
 				return Err(APIError::APIMisuseError {
 					err: "Failed due to duplicate request_id. This should never happen!"
 						.to_string(),
@@ -110,9 +104,9 @@ where
 		Ok(request_id)
 	}
 
-
 	fn handle_register_node_response(
-		&self, request_id: RequestId, counterparty_node_id: &PublicKey, result: RegisterNodeResponse,
+		&self, request_id: RequestId, counterparty_node_id: &PublicKey,
+		result: RegisterNodeResponse,
 	) -> Result<(), LightningError> {
 		let outer_state_lock = self.per_peer_state.read().unwrap();
 		match outer_state_lock.get(counterparty_node_id) {
