@@ -2,18 +2,12 @@
 
 use core::convert::TryFrom;
 
-use bitcoin::hashes::hmac::{Hmac, HmacEngine};
-use bitcoin::hashes::sha256::Hash as Sha256;
-use bitcoin::hashes::{Hash, HashEngine};
-use chrono::Utc;
 use serde::{Deserialize, Serialize};
 
 use lightning::util::scid_utils;
 
-use crate::lsps0::ser::{
-	string_amount, string_amount_option, LSPSMessage, RequestId, ResponseError,
-};
-use crate::prelude::{String, Vec};
+use crate::lsps0::ser::{LSPSMessage, RequestId};
+use crate::prelude::String;
 use crate::utils;
 
 pub(crate) const LSPS4_REGISTER_NODE_METHOD_NAME: &str = "lsps4.register_node";

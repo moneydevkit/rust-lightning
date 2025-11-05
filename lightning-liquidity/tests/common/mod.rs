@@ -134,8 +134,15 @@ pub(crate) struct Node {
 			Arc<KeysManager>,
 		>,
 	>,
-	pub(crate) liquidity_manager:
-		Arc<LiquidityManager<Arc<KeysManager>, Arc<ChannelManager>, Arc<dyn Filter + Send + Sync>, Arc<FilesystemStore>, Arc<test_utils::TestLogger>>>,
+	pub(crate) liquidity_manager: Arc<
+		LiquidityManager<
+			Arc<KeysManager>,
+			Arc<ChannelManager>,
+			Arc<dyn Filter + Send + Sync>,
+			Arc<FilesystemStore>,
+			Arc<test_utils::TestLogger>,
+		>,
+	>,
 	pub(crate) check_msgs_processed: Arc<AtomicBool>,
 	pub(crate) chain_monitor: Arc<ChainMonitor>,
 	pub(crate) kv_store: Arc<FilesystemStore>,
