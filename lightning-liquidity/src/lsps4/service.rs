@@ -55,6 +55,8 @@ const HTLC_EXPIRY_THRESHOLD_SECS: u64 = 10;
 pub(crate) struct HtlcForwardAction {
 	pub htlc: InterceptedHtlc,
 	pub channel_id: ChannelId,
+	pub amount_to_forward_msat: u64,
+	pub skimmed_fee_msat: u64,
 }
 
 /// Actions to take for processing HTLCs for a peer
@@ -70,7 +72,7 @@ impl HtlcProcessingActions {
 	}
 
 	pub fn total_forward_amount(&self) -> u64 {
-		self.forwards.iter().map(|f| f.htlc.expected_outbound_amount_msat()).sum()
+		self.forwards.iter().map(|f| f.amount_to_forward_msat).sum()
 	}
 }
 
@@ -79,6 +81,8 @@ impl HtlcProcessingActions {
 pub struct LSPS4ServiceConfig {
 	/// The CLTV expiry delta to use for the JIT channels.
 	pub cltv_expiry_delta: u32,
+	/// The proportional fee, in millionths, to skim from forwarded payments.
+	pub forwarding_fee_proportional_millionths: u64,
 }
 
 /// The main object allowing to send and receive LSPS4 messages.
@@ -265,17 +269,64 @@ where
 
 		log_info!(self.logger, "{} has {} channels with these outbound capacities: {:?}", their_node_id, channels.len(), channel_capacity_map);
 
+		struct ComputedHtlc {
+			htlc: InterceptedHtlc,
+			amount_to_forward_msat: u64,
+			skimmed_fee_msat: u64,
+		}
+
+		let mut computed_htlcs: Vec<ComputedHtlc> = htlcs.drain(..).map(|htlc| {
+			let expected_outbound_msat = htlc.expected_outbound_amount_msat();
+			if expected_outbound_msat == 0 {
+				return ComputedHtlc { htlc, amount_to_forward_msat: 0, skimmed_fee_msat: 0 };
+			}
+
+			let htlc_id = htlc.id();
+			let mut fee_msat = match crate::lsps4::utils::compute_forward_fee(
+				expected_outbound_msat,
+				self.config.forwarding_fee_proportional_millionths,
+			) {
+				Some(fee) => core::cmp::min(fee, expected_outbound_msat),
+				None => {
+					log_error!(
+						self.logger,
+						"Overflow while computing skimmed fee for intercepted HTLC {:?}. Skipping skim.",
+						htlc_id
+					);
+					0
+				},
+			};
+
+			let mut amount_to_forward_msat = expected_outbound_msat.saturating_sub(fee_msat);
+			if amount_to_forward_msat == 0 && fee_msat > 0 {
+				log_error!(
+					self.logger,
+					"Skimmed fee equaled the entire HTLC amount for {:?}. Skipping skim.",
+					htlc_id
+				);
+				fee_msat = 0;
+				amount_to_forward_msat = expected_outbound_msat;
+			}
+
+			ComputedHtlc { htlc, amount_to_forward_msat, skimmed_fee_msat: fee_msat }
+		}).collect();
+
 		let mut forwards = Vec::new();
 
-		while let Some(htlc) = htlcs.pop() {
-			let required_amount = htlc.expected_outbound_amount_msat();
+		while let Some(computed) = computed_htlcs.pop() {
+			let required_amount = computed.amount_to_forward_msat;
 			let mut can_forward = false;
 
 			// Check if any existing channel has sufficient remaining capacity
 			for (channel_id, remaining_capacity) in channel_capacity_map.iter_mut() {
 				if *remaining_capacity >= required_amount {
 					// Plan to forward this HTLC through this channel
-					forwards.push(HtlcForwardAction { htlc, channel_id: *channel_id });
+					forwards.push(HtlcForwardAction {
+						htlc: computed.htlc,
+						channel_id: *channel_id,
+						amount_to_forward_msat: computed.amount_to_forward_msat,
+						skimmed_fee_msat: computed.skimmed_fee_msat,
+					});
 
 					// Update remaining capacity after planning the forward
 					*remaining_capacity -= required_amount;
@@ -287,10 +338,9 @@ where
 			if !can_forward {
 				// No existing channel has sufficient capacity, need to open a new channel
 				// Calculate total amount needed for remaining HTLCs (including current one)
-				let mut total_remaining_amount = required_amount;
-				for remaining_htlc in &htlcs {
-					total_remaining_amount += remaining_htlc.expected_outbound_amount_msat();
-				}
+				let total_remaining_amount = computed_htlcs
+					.iter()
+					.fold(required_amount, |acc, h| acc.saturating_add(h.amount_to_forward_msat));
 
 				return HtlcProcessingActions {
 					forwards,
@@ -310,17 +360,18 @@ where
 		for forward_action in actions.forwards {
 			log_debug!(
 				self.logger,
-				"Executing forward for HTLC {:?} through channel {} with amount {}msat",
+				"Executing forward for HTLC {:?} through channel {} with amount {}msat (skimmed {}msat)",
 				forward_action.htlc.id(),
 				forward_action.channel_id,
-				forward_action.htlc.expected_outbound_amount_msat()
+				forward_action.amount_to_forward_msat,
+				forward_action.skimmed_fee_msat
 			);
 
 			if let Err(e) = self.channel_manager.get_cm().forward_intercepted_htlc(
 				forward_action.htlc.id(),
 				&forward_action.channel_id,
 				forward_action.htlc.next_node_id(),
-				forward_action.htlc.expected_outbound_amount_msat(),
+				forward_action.amount_to_forward_msat,
 			) {
 				log_error!(self.logger, "Failed to forward intercepted HTLC: {:?}", e);
 			}
@@ -356,17 +407,18 @@ where
 
 		log_info!(self.logger, "Calculated actions for peer {}: {:?}", their_node_id, actions);
 
-		if actions.forwards.is_empty() && actions.new_channel_needed_msat.is_none() {
+		if actions.is_empty() {
 			log_debug!(self.logger, "No HTLCs to process for peer {}", their_node_id);
 			return;
 		}
 
-		if !actions.forwards.is_empty() {
+		if actions.total_forward_amount() > 0 {
 			log_debug!(
 				self.logger,
-				"Processing {} HTLCs for peer {}",
+				"Processing {} HTLCs for peer {} totaling {}msat",
 				actions.forwards.len(),
-				their_node_id
+				their_node_id,
+				actions.total_forward_amount()
 			);
 		}
 
