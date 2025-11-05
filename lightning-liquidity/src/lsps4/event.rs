@@ -10,7 +10,6 @@
 //! Contains LSPS4 event types
 
 use crate::lsps0::ser::RequestId;
-use crate::prelude::{String, Vec};
 
 use bitcoin::secp256k1::PublicKey;
 

@@ -9,28 +9,21 @@
 
 //! Contains the main LSPS4 server-side object, [`LSPS4ServiceHandler`].
 
-use crate::events::{Event, EventQueue};
-use crate::lsps0::ser::{
-	LSPSMessage, ProtocolMessageHandler, RequestId, ResponseError,
-	JSONRPC_INTERNAL_ERROR_ERROR_CODE, JSONRPC_INTERNAL_ERROR_ERROR_MESSAGE,
-	LSPS0_CLIENT_REJECTED_ERROR_CODE,
-};
+use crate::events::EventQueue;
+use crate::lsps0::ser::{ProtocolMessageHandler, RequestId};
 use crate::lsps4::event::LSPS4ServiceEvent;
 use crate::lsps4::htlc_store::{HTLCStore, InterceptedHtlc};
 use crate::lsps4::scid_store::ScidStore;
-use crate::lsps4::utils::compute_forward_fee;
 use crate::message_queue::MessageQueue;
-use crate::prelude::hash_map::Entry;
-use crate::prelude::{new_hash_map, HashMap, String, ToString, Vec};
-use crate::sync::{Arc, Mutex, MutexGuard, RwLock};
+use crate::prelude::{new_hash_map, HashMap, Vec};
+use crate::sync::{Arc, RwLock};
 
-use lightning::events::HTLCDestination;
 use lightning::ln::channelmanager::{AChannelManager, InterceptId};
 use lightning::ln::msgs::{ErrorAction, LightningError};
 use lightning::ln::types::ChannelId;
-use lightning::{log_debug, log_error, log_info};
 use lightning::util::errors::APIError;
 use lightning::util::logger::{Level, Logger};
+use lightning::{log_debug, log_error, log_info};
 
 use lightning::util::persist::KVStore;
 use lightning_types::payment::PaymentHash;
@@ -38,12 +31,10 @@ use lightning_types::payment::PaymentHash;
 use bitcoin::secp256k1::PublicKey;
 
 use core::ops::Deref;
-use core::sync::atomic::{AtomicUsize, Ordering};
 use std::collections::HashSet;
 
 use crate::lsps4::msgs::{
-	RegisterNodeRequest, RegisterNodeResponse, LSPS4Message, LSPS4Request,
-	LSPS4Response,
+	LSPS4Message, LSPS4Request, LSPS4Response, RegisterNodeRequest, RegisterNodeResponse,
 };
 
 const HTLC_EXPIRY_THRESHOLD_SECS: u64 = 10;
@@ -145,11 +136,14 @@ where
 
 			if !self.is_peer_connected(&counterparty_node_id) {
 				self.htlc_store.insert(htlc).unwrap(); // TODO: handle persistence failures
-				self.pending_events.enqueue(crate::events::Event::LSPS4Service(LSPS4ServiceEvent::SendWebhook {
-					counterparty_node_id: counterparty_node_id.clone(),
-				}));
+				self.pending_events.enqueue(crate::events::Event::LSPS4Service(
+					LSPS4ServiceEvent::SendWebhook {
+						counterparty_node_id: counterparty_node_id.clone(),
+					},
+				));
 			} else {
-				let actions = self.calculate_htlc_actions_for_peer(counterparty_node_id,vec![htlc.clone()]);
+				let actions =
+					self.calculate_htlc_actions_for_peer(counterparty_node_id, vec![htlc.clone()]);
 
 				if actions.new_channel_needed_msat.is_some() {
 					self.htlc_store.insert(htlc).unwrap(); // TODO: handle persistence failures
@@ -167,10 +161,7 @@ where
 	/// Will attempt to forward pending htlcs for this counterparty if there are any.
 	///
 	/// [`Event::ChannelReady`]: lightning::events::Event::ChannelReady
-	pub fn channel_ready(
-		&self, counterparty_node_id: &PublicKey,
-	) -> Result<(), APIError> {
-
+	pub fn channel_ready(&self, counterparty_node_id: &PublicKey) -> Result<(), APIError> {
 		if self.is_peer_connected(counterparty_node_id) {
 			let htlcs = self.htlc_store.get_htlcs_by_node_id(counterparty_node_id);
 			self.process_htlcs_for_peer(counterparty_node_id.clone(), htlcs);
@@ -181,13 +172,22 @@ where
 
 	/// Will attempt to forward any pending intercepted htlcs to this counterparty.
 	pub fn peer_connected(&self, counterparty_node_id: PublicKey) {
-		log_info!(self.logger, "Peer connected: {} inserting into connected peers map", counterparty_node_id);
+		log_info!(
+			self.logger,
+			"Peer connected: {} inserting into connected peers map",
+			counterparty_node_id
+		);
 
 		self.connected_peers.write().unwrap().insert(counterparty_node_id);
 
 		let htlcs = self.htlc_store.get_htlcs_by_node_id(&counterparty_node_id);
 
-		log_info!(self.logger, "{} has {} htlcs waiting to be forwarded", counterparty_node_id, htlcs.len());
+		log_info!(
+			self.logger,
+			"{} has {} htlcs waiting to be forwarded",
+			counterparty_node_id,
+			htlcs.len()
+		);
 
 		self.process_htlcs_for_peer(counterparty_node_id.clone(), htlcs);
 	}
@@ -226,20 +226,30 @@ where
 	}
 
 	fn handle_register_node_request(
-		&self, request_id: RequestId, counterparty_node_id: &PublicKey, _params: RegisterNodeRequest,
+		&self, request_id: RequestId, counterparty_node_id: &PublicKey,
+		_params: RegisterNodeRequest,
 	) -> Result<(), LightningError> {
 		let intercept_scid = match self.scid_store.get_scid(counterparty_node_id) {
 			Some(intercept_scid) => intercept_scid,
 			None => {
 				let intercept_scid = self.channel_manager.get_cm().get_intercept_scid();
-				self.scid_store.add_intercepted_scid(intercept_scid, counterparty_node_id.clone()).unwrap();
+				self.scid_store
+					.add_intercepted_scid(intercept_scid, counterparty_node_id.clone())
+					.unwrap();
 				intercept_scid
-			}
+			},
 		};
-		self.pending_messages.enqueue(counterparty_node_id, LSPS4Message::Response(request_id, LSPS4Response::RegisterNode(RegisterNodeResponse {
-			jit_channel_scid: intercept_scid.into(),
-			lsp_cltv_expiry_delta: self.config.cltv_expiry_delta,
-		})).into());
+		self.pending_messages.enqueue(
+			counterparty_node_id,
+			LSPS4Message::Response(
+				request_id,
+				LSPS4Response::RegisterNode(RegisterNodeResponse {
+					jit_channel_scid: intercept_scid.into(),
+					lsp_cltv_expiry_delta: self.config.cltv_expiry_delta,
+				}),
+			)
+			.into(),
+		);
 		Ok(())
 	}
 
@@ -248,14 +258,21 @@ where
 	pub(crate) fn calculate_htlc_actions_for_peer(
 		&self, their_node_id: PublicKey, mut htlcs: Vec<InterceptedHtlc>,
 	) -> HtlcProcessingActions {
-		let channels = self.channel_manager.get_cm().list_channels_with_counterparty(&their_node_id);
+		let channels =
+			self.channel_manager.get_cm().list_channels_with_counterparty(&their_node_id);
 
 		let mut channel_capacity_map: HashMap<ChannelId, u64> = new_hash_map();
 		for channel in &channels {
 			channel_capacity_map.insert(channel.channel_id, channel.outbound_capacity_msat);
 		}
 
-		log_info!(self.logger, "{} has {} channels with these outbound capacities: {:?}", their_node_id, channels.len(), channel_capacity_map);
+		log_info!(
+			self.logger,
+			"{} has {} channels with these outbound capacities: {:?}",
+			their_node_id,
+			channels.len(),
+			channel_capacity_map
+		);
 
 		let mut forwards = Vec::new();
 
@@ -332,10 +349,12 @@ where
 				channel_size_msat
 			);
 
-			self.pending_events.enqueue(crate::events::Event::LSPS4Service(LSPS4ServiceEvent::OpenChannel {
-				their_network_key: their_node_id,
-				amt_to_forward_msat: channel_size_msat,
-			}));
+			self.pending_events.enqueue(crate::events::Event::LSPS4Service(
+				LSPS4ServiceEvent::OpenChannel {
+					their_network_key: their_node_id,
+					amt_to_forward_msat: channel_size_msat,
+				},
+			));
 		}
 	}
 
@@ -363,10 +382,10 @@ where
 
 		self.execute_htlc_actions(actions, their_node_id);
 	}
-
 }
 
-impl<CM: Deref + Clone, KV: Deref + Clone, L: Deref + Clone> ProtocolMessageHandler for LSPS4ServiceHandler<CM, KV, L>
+impl<CM: Deref + Clone, KV: Deref + Clone, L: Deref + Clone> ProtocolMessageHandler
+	for LSPS4ServiceHandler<CM, KV, L>
 where
 	CM::Target: AChannelManager,
 	KV::Target: KVStore,
