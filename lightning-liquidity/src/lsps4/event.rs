@@ -53,5 +53,7 @@ pub enum LSPS4ServiceEvent {
 		their_network_key: PublicKey,
 		/// The amount we need to forward to the client after opening.
 		amt_to_forward_msat: u64,
+		/// The number of channels currently open with the peer when the request is made.
+		channel_count: usize,
 	},
 }
