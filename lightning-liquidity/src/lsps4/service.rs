@@ -64,6 +64,7 @@ pub(crate) struct HtlcForwardAction {
 pub(crate) struct HtlcProcessingActions {
 	pub forwards: Vec<HtlcForwardAction>,
 	pub new_channel_needed_msat: Option<u64>,
+	pub channel_count: usize,
 }
 
 impl HtlcProcessingActions {
@@ -260,7 +261,9 @@ where
 	pub(crate) fn calculate_htlc_actions_for_peer(
 		&self, their_node_id: PublicKey, mut htlcs: Vec<InterceptedHtlc>,
 	) -> HtlcProcessingActions {
-		let channels = self.channel_manager.get_cm().list_channels_with_counterparty(&their_node_id);
+		let channels =
+			self.channel_manager.get_cm().list_channels_with_counterparty(&their_node_id);
+		let channel_count = channels.len();
 
 		let mut channel_capacity_map: HashMap<ChannelId, u64> = new_hash_map();
 		for channel in &channels {
@@ -275,41 +278,44 @@ where
 			skimmed_fee_msat: u64,
 		}
 
-		let mut computed_htlcs: Vec<ComputedHtlc> = htlcs.drain(..).map(|htlc| {
-			let expected_outbound_msat = htlc.expected_outbound_amount_msat();
-			if expected_outbound_msat == 0 {
-				return ComputedHtlc { htlc, amount_to_forward_msat: 0, skimmed_fee_msat: 0 };
-			}
+		let mut computed_htlcs: Vec<ComputedHtlc> = htlcs
+			.drain(..)
+			.map(|htlc| {
+				let expected_outbound_msat = htlc.expected_outbound_amount_msat();
+				if expected_outbound_msat == 0 {
+					return ComputedHtlc { htlc, amount_to_forward_msat: 0, skimmed_fee_msat: 0 };
+				}
 
-			let htlc_id = htlc.id();
-			let mut fee_msat = match crate::lsps4::utils::compute_forward_fee(
-				expected_outbound_msat,
-				self.config.forwarding_fee_proportional_millionths,
-			) {
-				Some(fee) => core::cmp::min(fee, expected_outbound_msat),
-				None => {
-					log_error!(
+				let htlc_id = htlc.id();
+				let mut fee_msat = match crate::lsps4::utils::compute_forward_fee(
+					expected_outbound_msat,
+					self.config.forwarding_fee_proportional_millionths,
+				) {
+					Some(fee) => core::cmp::min(fee, expected_outbound_msat),
+					None => {
+						log_error!(
 						self.logger,
 						"Overflow while computing skimmed fee for intercepted HTLC {:?}. Skipping skim.",
 						htlc_id
 					);
-					0
-				},
-			};
+						0
+					},
+				};
 
-			let mut amount_to_forward_msat = expected_outbound_msat.saturating_sub(fee_msat);
-			if amount_to_forward_msat == 0 && fee_msat > 0 {
-				log_error!(
-					self.logger,
-					"Skimmed fee equaled the entire HTLC amount for {:?}. Skipping skim.",
-					htlc_id
-				);
-				fee_msat = 0;
-				amount_to_forward_msat = expected_outbound_msat;
-			}
+				let mut amount_to_forward_msat = expected_outbound_msat.saturating_sub(fee_msat);
+				if amount_to_forward_msat == 0 && fee_msat > 0 {
+					log_error!(
+						self.logger,
+						"Skimmed fee equaled the entire HTLC amount for {:?}. Skipping skim.",
+						htlc_id
+					);
+					fee_msat = 0;
+					amount_to_forward_msat = expected_outbound_msat;
+				}
 
-			ComputedHtlc { htlc, amount_to_forward_msat, skimmed_fee_msat: fee_msat }
-		}).collect();
+				ComputedHtlc { htlc, amount_to_forward_msat, skimmed_fee_msat: fee_msat }
+			})
+			.collect();
 
 		let mut forwards = Vec::new();
 
@@ -345,11 +351,12 @@ where
 				return HtlcProcessingActions {
 					forwards,
 					new_channel_needed_msat: Some(total_remaining_amount),
+					channel_count,
 				};
 			}
 		}
 
-		HtlcProcessingActions { forwards, new_channel_needed_msat: None }
+		HtlcProcessingActions { forwards, new_channel_needed_msat: None, channel_count }
 	}
 
 	/// Execute the actions calculated by calculate_htlc_actions_for_peer
@@ -395,6 +402,7 @@ where
 			event_queue_notifier.enqueue(crate::events::LiquidityEvent::LSPS4Service(LSPS4ServiceEvent::OpenChannel {
 				their_network_key: their_node_id,
 				amt_to_forward_msat: channel_size_msat,
+				channel_count: actions.channel_count,
 			}));
 		}
 	}
