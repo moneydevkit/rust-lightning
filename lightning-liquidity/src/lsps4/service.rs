@@ -18,7 +18,9 @@ use crate::message_queue::MessageQueue;
 use crate::prelude::{new_hash_map, HashMap, Vec};
 use crate::sync::{Arc, RwLock};
 
-use lightning::ln::channelmanager::{AChannelManager, InterceptId};
+use lightning::ln::channelmanager::{
+	AChannelManager, InterceptId, FORWARD_INTERCEPT_RELEASE_CHANNEL_ID,
+};
 use lightning::ln::msgs::{ErrorAction, LightningError};
 use lightning::ln::types::ChannelId;
 use lightning::util::errors::APIError;
@@ -156,6 +158,19 @@ where
 
 				self.execute_htlc_actions(actions, counterparty_node_id.clone());
 			}
+		} else {
+			log_debug!(
+				self.logger,
+				"Forwarding intercepted HTLC {:?} for scid {} that is unrelated to LSPS4 clients",
+				intercept_id,
+				intercept_scid
+			);
+			self.channel_manager.get_cm().forward_intercepted_htlc(
+				intercept_id,
+				&FORWARD_INTERCEPT_RELEASE_CHANNEL_ID,
+				self.channel_manager.get_cm().get_our_node_id(),
+				expected_outbound_amount_msat,
+			)?;
 		}
 
 		Ok(())
