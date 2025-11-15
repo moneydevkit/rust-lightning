@@ -693,7 +693,7 @@ impl Default for ChannelConfig {
 			cltv_expiry_delta: 6 * 12, // 6 blocks/hour * 12 hours
 			max_dust_htlc_exposure: MaxDustHTLCExposure::FeeRateMultiplier(10000),
 			force_close_avoidance_max_fee_satoshis: 1000,
-			accept_underpaying_htlcs: false,
+			accept_underpaying_htlcs: true,
 		}
 	}
 }
@@ -723,7 +723,7 @@ impl crate::util::ser::Writeable for ChannelConfig {
 impl crate::util::ser::Readable for ChannelConfig {
 	fn read<R: crate::io::Read>(reader: &mut R) -> Result<Self, crate::ln::msgs::DecodeError> {
 		let mut forwarding_fee_proportional_millionths = 0;
-		let mut accept_underpaying_htlcs = false;
+		let mut accept_underpaying_htlcs = true;
 		let mut forwarding_fee_base_msat = 1000;
 		let mut cltv_expiry_delta = 6 * 12;
 		let mut max_dust_htlc_exposure_msat = None;
@@ -731,7 +731,7 @@ impl crate::util::ser::Readable for ChannelConfig {
 		let mut force_close_avoidance_max_fee_satoshis = 1000;
 		read_tlv_fields!(reader, {
 			(0, forwarding_fee_proportional_millionths, required),
-			(1, accept_underpaying_htlcs, (default_value, false)),
+			(1, accept_underpaying_htlcs, (default_value, true)),
 			(2, forwarding_fee_base_msat, required),
 			(3, max_dust_htlc_exposure_enum, option),
 			(4, cltv_expiry_delta, required),
@@ -875,7 +875,7 @@ impl crate::util::ser::Readable for LegacyChannelConfig {
 				cltv_expiry_delta,
 				force_close_avoidance_max_fee_satoshis,
 				forwarding_fee_base_msat,
-				accept_underpaying_htlcs: false,
+				accept_underpaying_htlcs: true,
 			},
 			announce_for_forwarding,
 			commit_upfront_shutdown_pubkey,
