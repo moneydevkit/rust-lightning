@@ -602,11 +602,6 @@ impl Readable for PaymentId {
 #[derive(Hash, Copy, Clone, PartialEq, Eq, Debug)]
 pub struct InterceptId(pub [u8; 32]);
 
-/// Sentinel [`ChannelId`] that can be passed to [`ChannelManager::forward_intercepted_htlc`] when
-/// you want to resume forwarding using the hop encoded in the payer's original onion (i.e., to
-/// release an intercepted HTLC without overriding the next-hop channel).
-pub const FORWARD_INTERCEPT_RELEASE_CHANNEL_ID: ChannelId = ChannelId([0; 32]);
-
 impl Writeable for InterceptId {
 	fn write<W: Writer>(&self, w: &mut W) -> Result<(), io::Error> {
 		self.0.write(w)
@@ -5520,11 +5515,6 @@ where
 	/// [`HTLCIntercepted::expected_outbound_amount_msat`] for more on forwarding a different amount
 	/// than expected.
 	///
-	/// If you simply want to resume forwarding using the hop encoded in the payer's original onion
-	/// (i.e., release the intercepted HTLC without overriding the next-hop channel), pass
-	/// [`FORWARD_INTERCEPT_RELEASE_CHANNEL_ID`] for `next_hop_channel_id`. In that case we ignore
-	/// `next_node_id` and `amt_to_forward_msat`.
-	///
 	/// Errors if the event was not handled in time, in which case the HTLC was automatically failed
 	/// backwards.
 	///
@@ -5534,9 +5524,6 @@ where
 	// TODO: when we move to deciding the best outbound channel at forward time, only take
 	// `next_node_id` and not `next_hop_channel_id`
 	pub fn forward_intercepted_htlc(&self, intercept_id: InterceptId, next_hop_channel_id: &ChannelId, next_node_id: PublicKey, amt_to_forward_msat: u64) -> Result<(), APIError> {
-		if next_hop_channel_id == &FORWARD_INTERCEPT_RELEASE_CHANNEL_ID {
-			return self.release_intercepted_htlc(intercept_id);
-		}
 		let _persistence_guard = PersistenceNotifierGuard::notify_on_drop(self);
 
 		let next_hop_scid = {
@@ -5597,36 +5584,6 @@ where
 			payment.prev_channel_id,
 			payment.prev_user_channel_id,
 			vec![(pending_htlc_info, payment.prev_htlc_id)]
-		)];
-		self.forward_htlcs(&mut per_source_pending_forward);
-		Ok(())
-	}
-
-	fn release_intercepted_htlc(&self, intercept_id: InterceptId) -> Result<(), APIError> {
-		let _persistence_guard = PersistenceNotifierGuard::notify_on_drop(self);
-
-		let payment = self.pending_intercepted_htlcs.lock().unwrap().remove(&intercept_id)
-			.ok_or_else(|| APIError::APIMisuseError {
-				err: format!("Payment with intercept id {} not found", log_bytes!(intercept_id.0))
-			})?;
-
-		let PendingAddHTLCInfo {
-			forward_info,
-			prev_short_channel_id,
-			prev_htlc_id,
-			prev_counterparty_node_id,
-			prev_channel_id,
-			prev_funding_outpoint,
-			prev_user_channel_id,
-		} = payment;
-
-		let mut per_source_pending_forward = [(
-			prev_short_channel_id,
-			prev_counterparty_node_id,
-			prev_funding_outpoint,
-			prev_channel_id,
-			prev_user_channel_id,
-			vec![(forward_info, prev_htlc_id)]
 		)];
 		self.forward_htlcs(&mut per_source_pending_forward);
 		Ok(())
