@@ -5524,6 +5524,9 @@ where
 	// TODO: when we move to deciding the best outbound channel at forward time, only take
 	// `next_node_id` and not `next_hop_channel_id`
 	pub fn forward_intercepted_htlc(&self, intercept_id: InterceptId, next_hop_channel_id: &ChannelId, next_node_id: PublicKey, amt_to_forward_msat: u64) -> Result<(), APIError> {
+		let entry_logger = WithContext::from(&self.logger, Some(next_node_id), Some(*next_hop_channel_id), None);
+		log_info!(entry_logger, "forward_intercepted_htlc called: intercept_id {:?} next_hop_channel_id {} next_node_id {} amt_to_forward_msat {}",
+			intercept_id, next_hop_channel_id, next_node_id, amt_to_forward_msat);
 		let _persistence_guard = PersistenceNotifierGuard::notify_on_drop(self);
 
 		let next_hop_scid = {
@@ -8975,6 +8978,11 @@ This indicates a bug inside LDK. Please report this error at https://github.com/
 					let decode_update_add_htlcs_empty = self.decode_update_add_htlcs.lock().unwrap().is_empty();
 					let mut forward_htlcs = self.forward_htlcs.lock().unwrap();
 					let forward_htlcs_empty = forward_htlcs.is_empty();
+					let is_intercept = fake_scid::is_valid_intercept(&self.fake_scid_rand_bytes, scid, &self.chain_hash);
+					let is_phantom = fake_scid::is_valid_phantom(&self.fake_scid_rand_bytes, scid, &self.chain_hash);
+					let logger = WithContext::from(&self.logger, None, Some(prev_channel_id), Some(forward_info.payment_hash));
+					log_debug!(logger, "Forward HTLC decision: scid {} is_our_scid={} is_intercept={} is_phantom={} incoming_amt_msat={:?} outgoing_amt_msat={} prev_short_channel_id={} prev_channel_id={}",
+						scid, is_our_scid, is_intercept, is_phantom, forward_info.incoming_amt_msat, forward_info.outgoing_amt_msat, prev_short_channel_id, prev_channel_id);
 					match forward_htlcs.entry(scid) {
 						hash_map::Entry::Occupied(mut entry) => {
 							entry.get_mut().push(HTLCForwardInfo::AddHTLC(PendingAddHTLCInfo {
@@ -8983,13 +8991,13 @@ This indicates a bug inside LDK. Please report this error at https://github.com/
 							}));
 						},
 						hash_map::Entry::Vacant(entry) => {
-							if !is_our_scid && forward_info.incoming_amt_msat.is_some() &&
-							   fake_scid::is_valid_intercept(&self.fake_scid_rand_bytes, scid, &self.chain_hash)
-							{
+							if !is_our_scid && forward_info.incoming_amt_msat.is_some() && is_intercept {
 								let intercept_id = InterceptId(Sha256::hash(&forward_info.incoming_shared_secret).to_byte_array());
 								let mut pending_intercepts = self.pending_intercepted_htlcs.lock().unwrap();
 								match pending_intercepts.entry(intercept_id) {
 									hash_map::Entry::Vacant(entry) => {
+										log_info!(logger, "Creating HTLCIntercepted event: intercept_id {:?} scid {} inbound_msat={} expected_outbound_msat={} prev_short_channel_id={} prev_channel_id={}",
+											intercept_id, scid, forward_info.incoming_amt_msat.unwrap(), forward_info.outgoing_amt_msat, prev_short_channel_id, prev_channel_id);
 										new_intercept_events.push_back((events::Event::HTLCIntercepted {
 											requested_next_hop_scid: scid,
 											payment_hash: forward_info.payment_hash,
@@ -9043,6 +9051,7 @@ This indicates a bug inside LDK. Please report this error at https://github.com/
 			}
 
 			if !new_intercept_events.is_empty() {
+				log_info!(WithContext::from(&self.logger, None, None, None), "Queueing {} HTLCIntercepted event(s)", new_intercept_events.len());
 				let mut events = self.pending_events.lock().unwrap();
 				events.append(&mut new_intercept_events);
 			}
