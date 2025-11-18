@@ -130,7 +130,21 @@ where
 		&self, intercept_scid: u64, intercept_id: InterceptId, expected_outbound_amount_msat: u64,
 		payment_hash: PaymentHash,
 	) -> Result<(), APIError> {
+		log_debug!(
+			self.logger,
+			"[htlc_intercepted] HTLC intercepted with scid {}, id {:?}, expected_outbound_amount_msat {}, payment_hash {}",
+			intercept_scid,
+			intercept_id,
+			expected_outbound_amount_msat,
+			payment_hash
+		);
 		if let Some(counterparty_node_id) = self.scid_store.get_peer(intercept_scid) {
+			log_debug!(
+				self.logger,
+				"[htlc_intercepted] Intercept SCID {} matches peer {}, processing HTLC",
+				intercept_scid,
+				counterparty_node_id
+			);
 			let htlc = InterceptedHtlc::new(
 				intercept_id,
 				intercept_scid,
@@ -140,6 +154,11 @@ where
 			);
 
 			if !self.is_peer_connected(&counterparty_node_id) {
+				log_debug!(
+					self.logger,
+					"[htlc_intercepted] Peer {} not connected, storing HTLC and sending webhook",
+					counterparty_node_id
+				);
 				self.htlc_store.insert(htlc).unwrap(); // TODO: handle persistence failures
 				self.pending_events.enqueue(crate::events::Event::LSPS4Service(
 					LSPS4ServiceEvent::SendWebhook {
@@ -147,6 +166,11 @@ where
 					},
 				));
 			} else {
+				log_debug!(
+					self.logger,
+					"[htlc_intercepted] Peer {} connected, processing HTLC immediately",
+					counterparty_node_id
+				);
 				let actions =
 					self.calculate_htlc_actions_for_peer(counterparty_node_id, vec![htlc.clone()]);
 
@@ -154,9 +178,28 @@ where
 					self.htlc_store.insert(htlc).unwrap(); // TODO: handle persistence failures
 				}
 
+				log_debug!(
+					self.logger,
+					"[htlc_intercepted] Calculated actions for peer {}: {:?}",
+					counterparty_node_id,
+					actions
+				);
+
 				self.execute_htlc_actions(actions, counterparty_node_id.clone());
 			}
+		} else {
+			log_debug!(
+					self.logger,
+					"[htlc_intercepted] Intercept SCID {} not present in scid_store; ignoring HTLC id {:?}",
+					intercept_scid,
+					intercept_id
+				);
 		}
+		log_debug!(
+			self.logger,
+			"[htlc_intercepted] Finalizing htlc_intercepted for intercept_scid {}",
+			intercept_scid
+		);
 
 		Ok(())
 	}
