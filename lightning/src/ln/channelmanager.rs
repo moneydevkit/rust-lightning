@@ -6712,6 +6712,9 @@ where
 		&self, intercept_id: InterceptId, next_hop_channel_id: &ChannelId, next_node_id: PublicKey,
 		amt_to_forward_msat: u64,
 	) -> Result<(), APIError> {
+		let entry_logger = WithContext::from(&self.logger, Some(next_node_id), Some(*next_hop_channel_id), None);
+		log_info!(entry_logger, "forward_intercepted_htlc called: intercept_id {:?} next_hop_channel_id {} next_node_id {} amt_to_forward_msat {}",
+			intercept_id, next_hop_channel_id, next_node_id, amt_to_forward_msat);
 		let _persistence_guard = PersistenceNotifierGuard::notify_on_drop(self);
 
 		let outbound_scid_alias = {
@@ -11265,38 +11268,43 @@ This indicates a bug inside LDK. Please report this error at https://github.com/
 					// Pull this now to avoid introducing a lock order with `forward_htlcs`.
 					let is_our_scid = self.short_to_chan_info.read().unwrap().contains_key(&scid);
 
-					let payment_hash = forward_info.payment_hash;
-					let logger = WithContext::from(
-						&self.logger,
-						None,
-						Some(prev_channel_id),
-						Some(payment_hash),
+
+				let payment_hash = forward_info.payment_hash;
+				let is_intercept = fake_scid::is_valid_intercept(&self.fake_scid_rand_bytes, scid, &self.chain_hash);
+				let is_phantom = fake_scid::is_valid_phantom(&self.fake_scid_rand_bytes, scid, &self.chain_hash);
+				let logger = WithContext::from(
+					&self.logger,
+					None,
+					Some(prev_channel_id),
+					Some(payment_hash),
+				);
+				log_debug!(logger, "Forward HTLC decision: scid {} is_our_scid={} is_intercept={} is_phantom={} incoming_amt_msat={:?} outgoing_amt_msat={} prev_short_channel_id={} prev_channel_id={}",
+					scid, is_our_scid, is_intercept, is_phantom, forward_info.incoming_amt_msat, forward_info.outgoing_amt_msat, prev_outbound_scid_alias, prev_channel_id);
+				let pending_add = PendingAddHTLCInfo {
+					prev_outbound_scid_alias,
+					prev_counterparty_node_id,
+					prev_funding_outpoint,
+					prev_channel_id,
+					prev_htlc_id,
+					prev_user_channel_id,
+					forward_info,
+				};
+				let mut fail_intercepted_htlc = |pending_add: PendingAddHTLCInfo| {
+					let htlc_source =
+						HTLCSource::PreviousHopData(pending_add.htlc_previous_hop_data());
+					let reason = HTLCFailReason::from_failure_code(
+						LocalHTLCFailureReason::UnknownNextPeer,
 					);
-					let pending_add = PendingAddHTLCInfo {
-						prev_outbound_scid_alias,
-						prev_counterparty_node_id,
-						prev_funding_outpoint,
-						prev_channel_id,
-						prev_htlc_id,
-						prev_user_channel_id,
-						forward_info,
+					let failure_type = HTLCHandlingFailureType::InvalidForward {
+						requested_forward_scid: scid,
 					};
-					let mut fail_intercepted_htlc = |pending_add: PendingAddHTLCInfo| {
-						let htlc_source =
-							HTLCSource::PreviousHopData(pending_add.htlc_previous_hop_data());
-						let reason = HTLCFailReason::from_failure_code(
-							LocalHTLCFailureReason::UnknownNextPeer,
-						);
-						let failure_type = HTLCHandlingFailureType::InvalidForward {
-							requested_forward_scid: scid,
-						};
-						failed_intercept_forwards.push((
-							htlc_source,
-							payment_hash,
-							reason,
-							failure_type,
-						));
-					};
+					failed_intercept_forwards.push((
+						htlc_source,
+						payment_hash,
+						reason,
+						failure_type,
+					));
+				};
 
 					// In the case that we have an HTLC that we're supposed to hold onto until the
 					// recipient comes online *and* the outbound scid is encoded as
@@ -11391,6 +11399,7 @@ This indicates a bug inside LDK. Please report this error at https://github.com/
 			}
 
 			if !new_intercept_events.is_empty() {
+				log_info!(WithContext::from(&self.logger, None, None, None), "Queueing {} HTLCIntercepted event(s)", new_intercept_events.len());
 				let mut events = self.pending_events.lock().unwrap();
 				events.append(&mut new_intercept_events);
 			}
