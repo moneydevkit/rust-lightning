@@ -67,6 +67,7 @@ pushd lightning-tests
 [ "$RUSTC_MINOR_VERSION" -lt 68 ] && cargo update -p syn --precise "2.0.106" --verbose
 [ "$RUSTC_MINOR_VERSION" -lt 68 ] && cargo update -p quote --precise "1.0.41" --verbose
 cargo test
+[ "$CI_MINIMIZE_DISK_USAGE" != "" ] && cargo clean
 popd
 
 echo -e "\n\nChecking and building docs for all workspace members individually..."
