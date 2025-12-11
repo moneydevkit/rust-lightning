@@ -990,6 +990,10 @@ pub struct ChannelHandshakeConfigUpdate {
 	/// The Proportion of the channel value to configure as counterparty's channel reserve. See
 	/// [`ChannelHandshakeConfig::their_channel_reserve_proportional_millionths`].
 	pub channel_reserve_proportional_millionths: Option<u32>,
+
+	/// The minimum absolute channel reserve value in satoshis that will be enforced regardless of
+	/// the proportional reserve calculation. See [`ChannelHandshakeConfig::min_their_channel_reserve_satoshis`].
+	pub min_their_channel_reserve_satoshis: Option<u64>,
 }
 
 impl ChannelHandshakeConfig {
@@ -1019,6 +1023,10 @@ impl ChannelHandshakeConfig {
 
 		if let Some(channel_reserve) = config.channel_reserve_proportional_millionths {
 			self.their_channel_reserve_proportional_millionths = channel_reserve;
+		}
+
+		if let Some(min_reserve) = config.min_their_channel_reserve_satoshis {
+			self.min_their_channel_reserve_satoshis = min_reserve;
 		}
 	}
 }
