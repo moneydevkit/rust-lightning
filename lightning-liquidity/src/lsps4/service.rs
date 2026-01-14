@@ -31,7 +31,7 @@ use lightning::{log_debug, log_error, log_info};
 use lightning::util::errors::APIError;
 use lightning::util::logger::{Level, Logger};
 
-use lightning::util::persist::KVStoreSync;
+use lightning::util::persist::{KVStore, KVStoreSync};
 use lightning_types::payment::PaymentHash;
 
 use bitcoin::secp256k1::PublicKey;
@@ -49,6 +49,10 @@ use std::string::String;
 use std::vec::Vec;
 
 const HTLC_EXPIRY_THRESHOLD_SECS: u64 = 10;
+
+use crate::utils::async_poll::dummy_waker;
+use core::task;
+use std::future::Future;
 
 /// Action to forward a specific HTLC through a channel
 #[derive(Debug)]
@@ -87,45 +91,43 @@ pub struct LSPS4ServiceConfig {
 }
 
 /// The main object allowing to send and receive LSPS4 messages.
-pub struct LSPS4ServiceHandler<CM: Deref + Clone, KS: Deref + Clone, L: Deref + Clone>
+pub struct LSPS4ServiceHandler<CM: Deref + Clone, K: Deref + Clone, L: Deref + Clone>
 where
 	CM::Target: AChannelManager,
-	KS::Target: lightning::util::persist::KVStoreSync,
+	K::Target: KVStore + KVStoreSync,
 	L::Target: Logger,
 {
 	channel_manager: CM,
-	kv_store_sync: KS,
 	logger: L,
 	pending_messages: Arc<MessageQueue>,
-	pending_events: Arc<EventQueue<lightning::util::persist::KVStoreSyncWrapper<KS>>>,
-	scid_store: ScidStore<L, KS>,
-	htlc_store: HTLCStore<L, KS>,
+	pending_events: Arc<EventQueue<K>>,
+	scid_store: ScidStore<L, K>,
+	htlc_store: HTLCStore<L, K>,
 	connected_peers: RwLock<HashSet<PublicKey>>,
 	config: LSPS4ServiceConfig,
 }
 
-impl<CM: Deref + Clone, KS: Deref + Clone, L: Deref + Clone> LSPS4ServiceHandler<CM, KS, L>
+impl<CM: Deref + Clone, K: Deref + Clone, L: Deref + Clone> LSPS4ServiceHandler<CM, K, L>
 where
 	CM::Target: AChannelManager,
-	KS::Target: lightning::util::persist::KVStoreSync,
+	K::Target: KVStore + KVStoreSync,
 	L::Target: Logger,
 {
 	/// Constructs a `LSPS4ServiceHandler`.
-	pub(crate) fn new(
+	pub(crate) async fn new(
 		pending_messages: Arc<MessageQueue>,
-		pending_events: Arc<EventQueue<lightning::util::persist::KVStoreSyncWrapper<KS>>>,
+		pending_events: Arc<EventQueue<K>>,
 		channel_manager: CM,
 		config: LSPS4ServiceConfig,
-		kv_store_sync: KS,
+		kv_store: K,
 		logger: L,
 	) -> Result<Self, lightning::io::Error> {
 		Ok(Self {
 			pending_messages,
 			pending_events,
-			scid_store: ScidStore::new(kv_store_sync.clone(), logger.clone())?,
-			htlc_store: HTLCStore::new(kv_store_sync.clone(), logger.clone())?,
+			scid_store: ScidStore::new(kv_store.clone(), logger.clone())?,
+			htlc_store: HTLCStore::new(kv_store.clone(), logger.clone())?,
 			channel_manager,
-			kv_store_sync,
 			config,
 			logger,
 			connected_peers: RwLock::new(HashSet::new()),
@@ -145,18 +147,18 @@ where
 		&self, intercept_scid: u64, intercept_id: InterceptId, expected_outbound_amount_msat: u64,
 		payment_hash: PaymentHash,
 	) -> Result<(), APIError> {
-		log_debug!(
+		log_info!(
 			self.logger,
-			"[htlc_intercepted] HTLC intercepted with scid {}, id {:?}, expected_outbound_amount_msat {}, payment_hash {}",
+			"[LSPS4] HTLC intercepted - SCID: {}, intercept_id: {:?}, amount: {} msat, payment_hash: {}",
 			intercept_scid,
 			intercept_id,
 			expected_outbound_amount_msat,
 			payment_hash
 		);
 		if let Some(counterparty_node_id) = self.scid_store.get_peer(intercept_scid) {
-			log_debug!(
+			log_info!(
 				self.logger,
-				"[htlc_intercepted] Intercept SCID {} matches peer {}, processing HTLC",
+				"[LSPS4] SCID {} matched to peer {}, processing HTLC",
 				intercept_scid,
 				counterparty_node_id
 			);
@@ -202,9 +204,9 @@ where
 				self.execute_htlc_actions(actions, counterparty_node_id.clone());
 			}
 		} else {
-			log_debug!(
+			log_error!(
 					self.logger,
-					"[htlc_intercepted] Intercept SCID {} not present in scid_store; ignoring HTLC id {:?}",
+					"[LSPS4] SCID {} NOT FOUND in scid_store! Cannot route HTLC {:?}. Payment will fail.",
 					intercept_scid,
 					intercept_id
 				);
@@ -237,13 +239,22 @@ where
 
 	/// Will attempt to forward any pending intercepted htlcs to this counterparty.
 	pub fn peer_connected(&self, counterparty_node_id: PublicKey) {
-		log_info!(self.logger, "Peer connected: {} inserting into connected peers map", counterparty_node_id);
+		log_info!(
+			self.logger,
+			"Peer connected: {} inserting into connected peers map",
+			counterparty_node_id
+		);
 
 		self.connected_peers.write().unwrap().insert(counterparty_node_id);
 
 		let htlcs = self.htlc_store.get_htlcs_by_node_id(&counterparty_node_id);
 
-		log_info!(self.logger, "{} has {} htlcs waiting to be forwarded", counterparty_node_id, htlcs.len());
+		log_info!(
+			self.logger,
+			"{} has {} htlcs waiting to be forwarded",
+			counterparty_node_id,
+			htlcs.len()
+		);
 
 		self.process_htlcs_for_peer(counterparty_node_id.clone(), htlcs);
 	}
@@ -252,7 +263,7 @@ where
 	///
 	/// Will fail the HTLCs and remove them from the store.
 	/// Needs to be called regularly to cleanup old htlcs.
-	pub fn handle_expired_htlcs(&self, now: u64) {
+	pub async fn handle_expired_htlcs(&self, now: u64) {
 		for htlc in self.htlc_store.get_expired_htlcs(now, HTLC_EXPIRY_THRESHOLD_SECS) {
 			if let Err(e) = self.channel_manager.get_cm().fail_intercepted_htlc(htlc.id()) {
 				log_error!(
@@ -284,19 +295,75 @@ where
 	fn handle_register_node_request(
 		&self, request_id: LSPSRequestId, counterparty_node_id: &PublicKey, _params: RegisterNodeRequest,
 	) -> Result<(), LightningError> {
+		log_info!(
+			self.logger,
+			"[LSPS4] Received RegisterNodeRequest from {} with request_id {:?}",
+			counterparty_node_id,
+			request_id
+		);
+
 		let intercept_scid = match self.scid_store.get_scid(counterparty_node_id) {
-			Some(intercept_scid) => intercept_scid,
+			Some(intercept_scid) => {
+				log_info!(
+					self.logger,
+					"[LSPS4] Found existing intercept SCID {} for peer {}",
+					intercept_scid,
+					counterparty_node_id
+				);
+				intercept_scid
+			},
 			None => {
 				let intercept_scid = self.channel_manager.get_cm().get_intercept_scid();
-				self.scid_store.add_intercepted_scid(intercept_scid, counterparty_node_id.clone()).unwrap();
+				log_info!(
+					self.logger,
+					"[LSPS4] Generated NEW intercept SCID {} for peer {}",
+					intercept_scid,
+					counterparty_node_id
+				);
+				self.scid_store.add_intercepted_scid(intercept_scid, counterparty_node_id.clone())
+					.map_err(|e| {
+						log_error!(
+							self.logger,
+							"[LSPS4] Failed to persist intercept SCID {} for peer {}: {}",
+							intercept_scid,
+							counterparty_node_id,
+							e
+						);
+						LightningError {
+							err: format!("Failed to add intercepted SCID: {}", e),
+							action: ErrorAction::IgnoreAndLog(Level::Error),
+						}
+					})?;
+				log_info!(
+					self.logger,
+					"[LSPS4] Successfully stored intercept SCID {} for peer {}",
+					intercept_scid,
+					counterparty_node_id
+				);
 				intercept_scid
 			}
 		};
+
+		log_info!(
+			self.logger,
+			"[LSPS4] Sending RegisterNodeResponse to {} with SCID {} and CLTV delta {}",
+			counterparty_node_id,
+			intercept_scid,
+			self.config.cltv_expiry_delta
+		);
+
 		let mut message_queue_notifier = self.pending_messages.notifier();
 		message_queue_notifier.enqueue(counterparty_node_id, LSPS4Message::Response(request_id, LSPS4Response::RegisterNode(RegisterNodeResponse {
 			jit_channel_scid: intercept_scid.into(),
 			lsp_cltv_expiry_delta: self.config.cltv_expiry_delta,
 		})).into());
+
+		log_info!(
+			self.logger,
+			"[LSPS4] RegisterNodeResponse enqueued successfully for peer {}",
+			counterparty_node_id
+		);
+
 		Ok(())
 	}
 
@@ -477,12 +544,27 @@ where
 		self.execute_htlc_actions(actions, their_node_id);
 	}
 
+	/// Persists the state of the service handler towards the given [`KVStore`] implementation.
+	///
+	/// This will be regularly called by LDK's background processor if necessary and only needs to
+	/// be called manually if it's not utilized.
+	///
+	/// Note: LSPS4 stores (ScidStore and HTLCStore) persist immediately when operations occur,
+	/// so this method is primarily for consistency with the interface. It may be used for
+	/// future cleanup or pruning operations.
+	pub(crate) fn persist(&self) -> Result<(), lightning::io::Error> {
+		// LSPS4 stores persist immediately when operations occur, so there's no batched
+		// persistence needed. This method exists for interface consistency and potential
+		// future use cases (e.g., cleanup, pruning, etc.).
+		Ok(())
+	}
+
 }
 
-impl<CM: Deref + Clone, KV: Deref + Clone, L: Deref + Clone> LSPSProtocolMessageHandler for LSPS4ServiceHandler<CM, KV, L>
+impl<CM: Deref + Clone, K: Deref + Clone, L: Deref + Clone> LSPSProtocolMessageHandler for LSPS4ServiceHandler<CM, K, L>
 where
 	CM::Target: AChannelManager,
-	KV::Target: KVStoreSync,
+	K::Target: KVStore + KVStoreSync,
 	L::Target: Logger,
 {
 	type ProtocolMessage = LSPS4Message;
