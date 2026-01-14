@@ -7,12 +7,8 @@
 
 use lightning::util::ser::{Readable, Writeable};
 use lightning::{impl_writeable_tlv_based, log_error};
-use lightning::ln::channelmanager::InterceptId;
-use lightning::ln::types::ChannelId;
-
 use lightning::util::logger::Logger;
 use lightning::util::persist::KVStoreSync;
-use lightning_types::payment::PaymentHash;
 
 use bitcoin::secp256k1::PublicKey;
 
@@ -20,8 +16,7 @@ use lightning::io::{self, Cursor};
 
 use std::collections::HashMap;
 use std::ops::Deref;
-use std::time::{SystemTime, UNIX_EPOCH};
-use crate::sync::{Arc, Mutex, MutexGuard, RwLock};
+use crate::sync::RwLock;
 
 
 use crate::lsps4::utils;
@@ -81,15 +76,18 @@ where L::Target: Logger, KV::Target: KVStoreSync {
 	) -> Result<Self, io::Error> {
 		let mut scids = Vec::new();
 
-		for stored_key in kv_store.list(
+		let stored_keys = kv_store.list(
 			INTERCEPT_SCID_STORE_PERSISTENCE_PRIMARY_NAMESPACE,
 			INTERCEPT_SCID_STORE_PERSISTENCE_SECONDARY_NAMESPACE,
-		)? {
-			let mut reader = Cursor::new(kv_store.read(
+		)?;
+
+		for stored_key in stored_keys {
+			let data = kv_store.read(
 				INTERCEPT_SCID_STORE_PERSISTENCE_PRIMARY_NAMESPACE,
 				INTERCEPT_SCID_STORE_PERSISTENCE_SECONDARY_NAMESPACE,
 				&stored_key,
-			)?);
+			)?;
+			let mut reader = Cursor::new(data);
 			let scid = ScidWithPeer::read(&mut reader).map_err(|e| {
 				log_error!(logger, "Failed to deserialize InterceptScid: {}", e);
 				io::Error::new(
@@ -110,12 +108,26 @@ where L::Target: Logger, KV::Target: KVStoreSync {
 	}
 
 	pub(crate) fn insert(&self, scid: ScidWithPeer) -> Result<bool, io::Error> {
+		use lightning::log_info;
+		log_info!(self.logger, "[LSPS4 ScidStore] Inserting SCID {} for peer {}", scid.scid(), scid.peer_id());
+
+		// Persist first
+		self.persist(&scid)?;
+
+		// Then insert into the maps
 		let mut locked_peer_by_scid = self.peer_by_scid.write().unwrap();
 		let mut locked_scid_by_peer = self.scid_by_peer.write().unwrap();
-
-		self.persist(&scid)?;
 		let updated = locked_peer_by_scid.insert(scid.scid(), scid.peer_id().clone()).is_some();
 		locked_scid_by_peer.insert(scid.peer_id().clone(), scid.scid());
+
+		log_info!(
+			self.logger,
+			"[LSPS4 ScidStore] Successfully inserted SCID {} for peer {} (was_update: {})",
+			scid.scid(),
+			scid.peer_id(),
+			updated
+		);
+
 		Ok(updated)
 	}
 
@@ -170,10 +182,26 @@ where L::Target: Logger, KV::Target: KVStoreSync {
 	}
 
 	pub fn get_peer(&self, scid: u64) -> Option<PublicKey> {
-		self.peer_by_scid.read().unwrap().get(&scid).cloned()
+		use lightning::log_debug;
+		let result = self.peer_by_scid.read().unwrap().get(&scid).cloned();
+		log_debug!(
+			self.logger,
+			"[LSPS4 ScidStore] get_peer({}) = {:?}",
+			scid,
+			result
+		);
+		result
 	}
 
 	pub fn get_scid(&self, peer_id: &PublicKey) -> Option<u64> {
-		self.scid_by_peer.read().unwrap().get(peer_id).cloned()
+		use lightning::log_debug;
+		let result = self.scid_by_peer.read().unwrap().get(peer_id).cloned();
+		log_debug!(
+			self.logger,
+			"[LSPS4 ScidStore] get_scid({}) = {:?}",
+			peer_id,
+			result
+		);
+		result
 	}
 }

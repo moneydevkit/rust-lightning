@@ -247,6 +247,35 @@ where
 	}
 }
 
+impl<K: Deref> KVStoreSync for KVStoreSyncWrapper<K>
+where
+	K::Target: KVStoreSync,
+{
+	fn read(
+		&self, primary_namespace: &str, secondary_namespace: &str, key: &str,
+	) -> io::Result<Vec<u8>> {
+		self.0.read(primary_namespace, secondary_namespace, key)
+	}
+
+	fn write(
+		&self, primary_namespace: &str, secondary_namespace: &str, key: &str, buf: Vec<u8>,
+	) -> io::Result<()> {
+		self.0.write(primary_namespace, secondary_namespace, key, buf.to_vec())
+	}
+
+	fn remove(
+		&self, primary_namespace: &str, secondary_namespace: &str, key: &str, lazy: bool,
+	) -> io::Result<()> {
+		self.0.remove(primary_namespace, secondary_namespace, key, lazy)
+	}
+
+	fn list(
+		&self, primary_namespace: &str, secondary_namespace: &str,
+	) -> io::Result<Vec<String>> {
+		self.0.list(primary_namespace, secondary_namespace)
+	}
+}
+
 /// Provides an interface that allows storage and retrieval of persisted values that are associated
 /// with given keys.
 ///
