@@ -8,8 +8,6 @@
 use lightning::util::ser::{Readable, Writeable};
 use lightning::{impl_writeable_tlv_based, log_error};
 use lightning::ln::channelmanager::InterceptId;
-use lightning::ln::types::ChannelId;
-
 use lightning::util::logger::Logger;
 use lightning::util::persist::KVStoreSync;
 use lightning_types::payment::PaymentHash;
@@ -112,15 +110,18 @@ where L::Target: Logger, KV::Target: KVStoreSync {
 	) -> Result<Self, io::Error> {
 		let mut htlcs = Vec::new();
 
-		for stored_key in kv_store.list(
+		let stored_keys = kv_store.list(
 			INTERCEPTED_HTLC_STORE_PERSISTENCE_PRIMARY_NAMESPACE,
 			INTERCEPTED_HTLC_STORE_PERSISTENCE_SECONDARY_NAMESPACE,
-		)? {
-			let mut reader = Cursor::new(kv_store.read(
+		)?;
+
+		for stored_key in stored_keys {
+			let data = kv_store.read(
 				INTERCEPTED_HTLC_STORE_PERSISTENCE_PRIMARY_NAMESPACE,
 				INTERCEPTED_HTLC_STORE_PERSISTENCE_SECONDARY_NAMESPACE,
 				&stored_key,
-			)?);
+			)?;
+			let mut reader = Cursor::new(data);
 			let htlc = InterceptedHtlc::read(&mut reader).map_err(|e| {
 				log_error!(logger, "Failed to deserialize InterceptedHtlc: {}", e);
 				io::Error::new(
@@ -138,13 +139,19 @@ where L::Target: Logger, KV::Target: KVStoreSync {
 	}
 
 	pub(crate) fn insert(&self, htlc: InterceptedHtlc) -> Result<bool, io::Error> {
-		let mut locked_htlcs = self.htlcs.lock().unwrap();
-
-		if locked_htlcs.contains_key(&htlc.id()) {
-			return Ok(false);
+		// Check if already exists
+		{
+			let locked_htlcs = self.htlcs.lock().unwrap();
+			if locked_htlcs.contains_key(&htlc.id()) {
+				return Ok(false);
+			}
 		}
 
+		// Persist first (outside the lock)
 		self.persist(&htlc)?;
+
+		// Then insert into the map
+		let mut locked_htlcs = self.htlcs.lock().unwrap();
 		let updated = locked_htlcs.insert(htlc.id(), htlc).is_some();
 		Ok(updated)
 	}
