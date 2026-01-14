@@ -127,7 +127,7 @@ pub trait ALiquidityManager {
 	/// A type that may be dereferenced to [`Self::Filter`].
 	type C: Deref<Target = Self::Filter> + Clone;
 	/// A type implementing [`KVStore`].
-	type KVStore: KVStore + ?Sized;
+	type KVStore: KVStore + KVStoreSync + ?Sized;
 	/// A type that may be dereferenced to [`Self::KVStore`].
 	type K: Deref<Target = Self::KVStore> + Clone;
 	/// A type implementing [`TimeProvider`].
@@ -138,10 +138,14 @@ pub trait ALiquidityManager {
 	type BroadcasterInterface: BroadcasterInterface + ?Sized;
 	/// A type that may be dereferenced to [`Self::BroadcasterInterface`].
 	type T: Deref<Target = Self::BroadcasterInterface> + Clone;
+	/// A type implementing [`Logger`].
+	type Logger: Logger + ?Sized;
+	/// A type that may be dereferenced to [`Self::Logger`].
+	type L: Deref<Target = Self::Logger> + Clone;
 	/// Returns a reference to the actual [`LiquidityManager`] object.
 	fn get_lm(
 		&self,
-	) -> &LiquidityManager<Self::ES, Self::NS, Self::CM, Self::C, Self::K, Self::TP, Self::T>;
+	) -> &LiquidityManager<Self::ES, Self::NS, Self::CM, Self::C, Self::K, Self::TP, Self::T, Self::L>;
 }
 
 impl<
@@ -152,15 +156,17 @@ impl<
 		K: Deref + Clone,
 		TP: Deref + Clone,
 		T: Deref + Clone,
-	> ALiquidityManager for LiquidityManager<ES, NS, CM, C, K, TP, T>
+		L: Deref + Clone,
+	> ALiquidityManager for LiquidityManager<ES, NS, CM, C, K, TP, T, L>
 where
 	ES::Target: EntropySource,
 	NS::Target: NodeSigner,
 	CM::Target: AChannelManager,
 	C::Target: Filter,
-	K::Target: KVStore,
+	K::Target: KVStore + KVStoreSync,
 	TP::Target: TimeProvider,
 	T::Target: BroadcasterInterface,
+	L::Target: Logger,
 {
 	type EntropySource = ES::Target;
 	type ES = ES;
@@ -176,7 +182,9 @@ where
 	type TP = TP;
 	type BroadcasterInterface = T::Target;
 	type T = T;
-	fn get_lm(&self) -> &LiquidityManager<ES, NS, CM, C, K, TP, T> {
+	type Logger = L::Target;
+	type L = L;
+	fn get_lm(&self) -> &LiquidityManager<ES, NS, CM, C, K, TP, T, L> {
 		self
 	}
 }
@@ -230,6 +238,7 @@ pub trait ALiquidityManagerSync {
 		KVStoreSyncWrapper<Self::KS>,
 		Self::TP,
 		Self::T,
+		Self::L,
 	>;
 	/// Returns a reference to the actual [`LiquidityManager`] object.
 	fn get_lm(
@@ -285,6 +294,7 @@ where
 		KVStoreSyncWrapper<Self::KS>,
 		Self::TP,
 		Self::T,
+		Self::L,
 	> {
 		&self.inner
 	}
@@ -320,14 +330,16 @@ pub struct LiquidityManager<
 	K: Deref + Clone,
 	TP: Deref + Clone,
 	T: Deref + Clone,
+	L: Deref + Clone
 > where
 	ES::Target: EntropySource,
 	NS::Target: NodeSigner,
 	CM::Target: AChannelManager,
 	C::Target: Filter,
-	K::Target: KVStore,
+	K::Target: KVStore + KVStoreSync,
 	TP::Target: TimeProvider,
 	T::Target: BroadcasterInterface,
+	L::Target: Logger,
 {
 	pending_messages: Arc<MessageQueue>,
 	pending_events: Arc<EventQueue<K>>,
@@ -342,6 +354,7 @@ pub struct LiquidityManager<
 	lsps2_service_handler: Option<LSPS2ServiceHandler<CM, K, T>>,
 	lsps2_client_handler: Option<LSPS2ClientHandler<ES, K>>,
 	lsps4_client_handler: Option<LSPS4ClientHandler<ES, K>>,
+	lsps4_service_handler: Option<LSPS4ServiceHandler<CM, K, L>>,
 	lsps5_service_handler: Option<LSPS5ServiceHandler<CM, NS, K, TP>>,
 	lsps5_client_handler: Option<LSPS5ClientHandler<ES, K>>,
 	service_config: Option<LiquidityServiceConfig>,
@@ -359,23 +372,28 @@ impl<
 		C: Deref + Clone,
 		K: Deref + Clone,
 		T: Deref + Clone,
-	> LiquidityManager<ES, NS, CM, C, K, DefaultTimeProvider, T>
+		L: Deref + Clone,
+	> LiquidityManager<ES, NS, CM, C, K, DefaultTimeProvider, T, L>
 where
 	ES::Target: EntropySource,
 	NS::Target: NodeSigner,
 	CM::Target: AChannelManager,
 	C::Target: Filter,
-	K::Target: KVStore,
+	K::Target: KVStore + KVStoreSync,
 	T::Target: BroadcasterInterface,
+	L::Target: Logger,
 {
 	/// Constructor for the [`LiquidityManager`] using the default system clock
 	///
 	/// Will read persisted service states from the given [`KVStore`].
+	///
+	/// `logger` is required when LSPS4 service is configured, otherwise it can be `None`.
 	pub async fn new(
 		entropy_source: ES, node_signer: NS, channel_manager: CM, chain_source: Option<C>,
 		chain_params: Option<ChainParameters>, kv_store: K, transaction_broadcaster: T,
 		service_config: Option<LiquidityServiceConfig>,
 		client_config: Option<LiquidityClientConfig>,
+		logger: L,
 	) -> Result<Self, lightning::io::Error> {
 		Self::new_with_custom_time_provider(
 			entropy_source,
@@ -388,6 +406,7 @@ where
 			service_config,
 			client_config,
 			DefaultTimeProvider,
+			logger,
 		)
 		.await
 	}
@@ -401,15 +420,17 @@ impl<
 		K: Deref + Clone,
 		TP: Deref + Clone,
 		T: Deref + Clone,
-	> LiquidityManager<ES, NS, CM, C, K, TP, T>
+		L: Deref + Clone,
+	> LiquidityManager<ES, NS, CM, C, K, TP, T, L>
 where
 	ES::Target: EntropySource,
 	NS::Target: NodeSigner,
 	CM::Target: AChannelManager,
 	C::Target: Filter,
-	K::Target: KVStore,
+	K::Target: KVStore + KVStoreSync,
 	TP::Target: TimeProvider,
 	T::Target: BroadcasterInterface,
+	L::Target: Logger,
 {
 	/// Constructor for the [`LiquidityManager`] with a custom time provider.
 	///
@@ -419,11 +440,14 @@ where
 	/// available.
 	/// Sets up the required protocol message handlers based on the given
 	/// [`LiquidityClientConfig`] and [`LiquidityServiceConfig`].
+	///
+	/// `logger` is required when LSPS4 service is configured, otherwise it can be `None`.
 	pub async fn new_with_custom_time_provider(
 		entropy_source: ES, node_signer: NS, channel_manager: CM, transaction_broadcaster: T,
 		chain_source: Option<C>, chain_params: Option<ChainParameters>, kv_store: K,
 		service_config: Option<LiquidityServiceConfig>,
 		client_config: Option<LiquidityClientConfig>, time_provider: TP,
+		logger: L,
 	) -> Result<Self, lightning::io::Error> {
 		let pending_msgs_or_needs_persist_notifier = Arc::new(Notifier::new());
 		let pending_messages =
@@ -522,6 +546,29 @@ where
 			None
 		};
 
+		let lsps4_service_handler = if let Some(service_config) = service_config.as_ref() {
+			if let Some(lsps4_service_config) = service_config.lsps4_service_config.as_ref() {
+				if let Some(number) =
+					<LSPS4ServiceHandler<CM, K, L> as LSPSProtocolMessageHandler>::PROTOCOL_NUMBER
+				{
+					supported_protocols.push(number);
+				}
+
+				Some(LSPS4ServiceHandler::new(
+					Arc::clone(&pending_messages),
+					Arc::clone(&pending_events),
+					channel_manager.clone(),
+					lsps4_service_config.clone(),
+					kv_store.clone(),
+					logger.clone(),
+				).await?)
+			} else {
+				None
+			}
+		} else {
+			None
+		};
+
 		let lsps1_client_handler = client_config.as_ref().and_then(|config| {
 			config.lsps1_client_config.as_ref().map(|config| {
 				LSPS1ClientHandler::new(
@@ -577,6 +624,7 @@ where
 			lsps2_client_handler,
 			lsps2_service_handler,
 			lsps4_client_handler,
+			lsps4_service_handler,
 			lsps5_client_handler,
 			lsps5_service_handler,
 			service_config,
@@ -634,6 +682,13 @@ where
 	/// the configured LSP open a 'just-in-time' channel.
 	pub fn lsps4_client_handler(&self) -> Option<&LSPS4ClientHandler<ES, K>> {
 		self.lsps4_client_handler.as_ref()
+	}
+
+	/// Returns a reference to the LSPS4 server-side handler.
+	///
+	/// The returned handler allows to initiate the LSPS4 service-side flow.
+	pub fn lsps4_service_handler(&self) -> Option<&LSPS4ServiceHandler<CM, K, L>> {
+		self.lsps4_service_handler.as_ref()
 	}
 
 
@@ -720,6 +775,10 @@ where
 			lsps2_service_handler.persist().await?;
 		}
 
+		if let Some(lsps4_service_handler) = self.lsps4_service_handler.as_ref() {
+			lsps4_service_handler.persist()?;
+		}
+
 		if let Some(lsps5_service_handler) = self.lsps5_service_handler.as_ref() {
 			lsps5_service_handler.persist().await?;
 		}
@@ -800,9 +859,15 @@ where
 					},
 				}
 			},
-			LSPSMessage::LSPS4(LSPS4Message::Request(..)) => {
-				// LSPS4 service handler is only available in LiquidityManagerSync
-				return Err(LightningError { err: format!("Received LSPS4 request message without LSPS4 service handler configured. From node = {:?}", sender_node_id), action: ErrorAction::IgnoreAndLog(Level::Info)});
+			LSPSMessage::LSPS4(msg @ LSPS4Message::Request(..)) => {
+				match &self.lsps4_service_handler {
+					Some(lsps4_service_handler) => {
+						lsps4_service_handler.handle_message(msg, sender_node_id)?;
+					},
+					None => {
+						return Err(LightningError { err: format!("Received LSPS4 request message without LSPS4 service handler configured. From node = {:?}", sender_node_id), action: ErrorAction::IgnoreAndLog(Level::Info)});
+					},
+				}
 			},
 			LSPSMessage::LSPS5(msg @ LSPS5Message::Response(..)) => {
 				match &self.lsps5_client_handler {
@@ -860,15 +925,17 @@ impl<
 		K: Deref + Clone,
 		TP: Deref + Clone,
 		T: Deref + Clone,
-	> CustomMessageReader for LiquidityManager<ES, NS, CM, C, K, TP, T>
+		L: Deref + Clone
+	> CustomMessageReader for LiquidityManager<ES, NS, CM, C, K, TP, T, L>
 where
 	ES::Target: EntropySource,
 	NS::Target: NodeSigner,
 	CM::Target: AChannelManager,
 	C::Target: Filter,
-	K::Target: KVStore,
+	K::Target: KVStore + KVStoreSync,
 	TP::Target: TimeProvider,
 	T::Target: BroadcasterInterface,
+	L::Target: Logger,
 {
 	type CustomMessage = RawLSPSMessage;
 
@@ -892,15 +959,17 @@ impl<
 		K: Deref + Clone,
 		TP: Deref + Clone,
 		T: Deref + Clone,
-	> CustomMessageHandler for LiquidityManager<ES, NS, CM, C, K, TP, T>
+		L: Deref + Clone
+	> CustomMessageHandler for LiquidityManager<ES, NS, CM, C, K, TP, T, L>
 where
 	ES::Target: EntropySource,
 	NS::Target: NodeSigner,
 	CM::Target: AChannelManager,
 	C::Target: Filter,
-	K::Target: KVStore,
+	K::Target: KVStore + KVStoreSync,
 	TP::Target: TimeProvider,
 	T::Target: BroadcasterInterface,
+	L::Target: Logger,
 {
 	fn handle_custom_message(
 		&self, msg: Self::CustomMessage, sender_node_id: PublicKey,
@@ -1002,7 +1071,9 @@ where
 			lsps2_service_handler.peer_disconnected(counterparty_node_id);
 		}
 
-		// LSPS4 service handler is only available in LiquidityManagerSync
+		if let Some(lsps4_service_handler) = self.lsps4_service_handler.as_ref() {
+			lsps4_service_handler.peer_disconnected(&counterparty_node_id);
+		}
 
 		if let Some(lsps5_service_handler) = self.lsps5_service_handler.as_ref() {
 			lsps5_service_handler.peer_disconnected(&counterparty_node_id);
@@ -1012,8 +1083,9 @@ where
 		&self, counterparty_node_id: bitcoin::secp256k1::PublicKey, _: &lightning::ln::msgs::Init,
 		_: bool,
 	) -> Result<(), ()> {
-
-		// LSPS4 service handler is only available in LiquidityManagerSync
+		if let Some(lsps4_service_handler) = self.lsps4_service_handler.as_ref() {
+			lsps4_service_handler.peer_connected(counterparty_node_id);
+		}
 
 		if let Some(lsps5_service_handler) = self.lsps5_service_handler.as_ref() {
 			lsps5_service_handler.peer_connected(&counterparty_node_id);
@@ -1031,15 +1103,17 @@ impl<
 		K: Deref + Clone,
 		TP: Deref + Clone,
 		T: Deref + Clone,
-	> Listen for LiquidityManager<ES, NS, CM, C, K, TP, T>
+		L: Deref + Clone
+	> Listen for LiquidityManager<ES, NS, CM, C, K, TP, T, L>
 where
 	ES::Target: EntropySource,
 	NS::Target: NodeSigner,
 	CM::Target: AChannelManager,
 	C::Target: Filter,
-	K::Target: KVStore,
+	K::Target: KVStore + KVStoreSync,
 	TP::Target: TimeProvider,
 	T::Target: BroadcasterInterface,
+	L::Target: Logger,
 {
 	fn filtered_block_connected(
 		&self, header: &bitcoin::block::Header, txdata: &chain::transaction::TransactionData,
@@ -1077,15 +1151,17 @@ impl<
 		K: Deref + Clone,
 		TP: Deref + Clone,
 		T: Deref + Clone,
-	> Confirm for LiquidityManager<ES, NS, CM, C, K, TP, T>
+		L: Deref + Clone
+	> Confirm for LiquidityManager<ES, NS, CM, C, K, TP, T, L>
 where
 	ES::Target: EntropySource,
 	NS::Target: NodeSigner,
 	CM::Target: AChannelManager,
 	C::Target: Filter,
-	K::Target: KVStore,
+	K::Target: KVStore + KVStoreSync,
 	TP::Target: TimeProvider,
 	T::Target: BroadcasterInterface,
+	L::Target: Logger,
 {
 	fn transactions_confirmed(
 		&self, _header: &bitcoin::block::Header, _txdata: &chain::transaction::TransactionData,
@@ -1134,8 +1210,7 @@ pub struct LiquidityManagerSync<
 	T::Target: BroadcasterInterface,
 	L::Target: Logger,
 {
-	inner: LiquidityManager<ES, NS, CM, C, KVStoreSyncWrapper<KS>, TP, T>,
-	lsps4_service_handler: Option<LSPS4ServiceHandler<CM, KS, L>>,
+	inner: LiquidityManager<ES, NS, CM, C, KVStoreSyncWrapper<KS>, TP, T, L>,
 }
 
 #[cfg(feature = "time")]
@@ -1179,6 +1254,7 @@ where
 			transaction_broadcaster,
 			service_config.clone(),
 			client_config,
+			logger,
 		));
 
 		let mut waker = dummy_waker();
@@ -1191,25 +1267,8 @@ where
 			},
 		}?;
 
-		// Create LSPS4 service handler with sync store if service is configured
-		let lsps4_service_handler = if let Some(ref config) = service_config {
-			if config.lsps4_service_config.is_some() {
-				Some(LSPS4ServiceHandler::new(
-					inner.pending_messages.clone(),
-					inner.pending_events.clone(),
-					channel_manager,
-					config.lsps4_service_config.clone().unwrap(),
-					kv_store_sync,
-					logger,
-				)?)
-			} else {
-				None
-			}
-		} else {
-			None
-		};
 
-		Ok(Self { inner, lsps4_service_handler })
+		Ok(Self { inner })
 	}
 }
 
@@ -1255,6 +1314,7 @@ where
 			service_config.clone(),
 			client_config,
 			time_provider,
+			logger,
 		));
 
 		let mut waker = dummy_waker();
@@ -1267,25 +1327,8 @@ where
 			},
 		}?;
 
-		// Create LSPS4 service handler with sync store if service is configured
-		let lsps4_service_handler = if let Some(ref config) = service_config {
-			if config.lsps4_service_config.is_some() {
-				Some(LSPS4ServiceHandler::new(
-					inner.pending_messages.clone(),
-					inner.pending_events.clone(),
-					channel_manager,
-					config.lsps4_service_config.clone().unwrap(),
-					kv_store_sync,
-					logger,
-				)?)
-			} else {
-				None
-			}
-		} else {
-			None
-		};
 
-		Ok(Self { inner, lsps4_service_handler })
+		Ok(Self { inner })
 	}
 
 	/// Returns a reference to the LSPS0 client-side handler.
@@ -1346,9 +1389,9 @@ where
 
 	/// Returns a reference to the LSPS4 server-side handler.
 	///
-	/// The returned hendler allows to initiate the LSPS4 service-side flow.
-	pub fn lsps4_service_handler(&self) -> Option<&LSPS4ServiceHandler<CM, KS, L>> {
-		self.lsps4_service_handler.as_ref()
+	/// Wraps [`LiquidityManager::lsps4_service_handler`].
+	pub fn lsps4_service_handler(&self) -> Option<&LSPS4ServiceHandler<CM, KVStoreSyncWrapper<KS>, L>> {
+		self.inner.lsps4_service_handler()
 	}
 
 	/// Returns a reference to the LSPS5 client-side handler.
@@ -1471,20 +1514,6 @@ where
 	fn handle_custom_message(
 		&self, msg: Self::CustomMessage, sender_node_id: PublicKey,
 	) -> Result<(), lightning::ln::msgs::LightningError> {
-		// Parse the message first to see if it's an LSPS4 service request
-		if let Some(ref handler) = self.lsps4_service_handler {
-			let parsed_msg = {
-				let mut request_id_to_method_map = self.inner.request_id_to_method_map.lock().unwrap();
-				LSPSMessage::from_str_with_id_map(&msg.payload, &mut request_id_to_method_map)
-			};
-
-			if let Ok(LSPSMessage::LSPS4(lsps4_msg @ LSPS4Message::Request(..))) = parsed_msg {
-				// Handle LSPS4 service requests with our sync handler
-				return handler.handle_message(lsps4_msg, &sender_node_id);
-			}
-		}
-
-		// Delegate everything else to the inner manager
 		self.inner.handle_custom_message(msg, sender_node_id)
 	}
 
@@ -1501,22 +1530,12 @@ where
 	}
 
 	fn peer_disconnected(&self, counterparty_node_id: bitcoin::secp256k1::PublicKey) {
-		// Notify LSPS4 service handler if present
-		if let Some(ref handler) = self.lsps4_service_handler {
-			handler.peer_disconnected(&counterparty_node_id);
-		}
-
 		self.inner.peer_disconnected(counterparty_node_id)
 	}
 	fn peer_connected(
 		&self, counterparty_node_id: bitcoin::secp256k1::PublicKey,
 		init_msg: &lightning::ln::msgs::Init, inbound: bool,
 	) -> Result<(), ()> {
-		// Notify LSPS4 service handler if present
-		if let Some(ref handler) = self.lsps4_service_handler {
-			handler.peer_connected(counterparty_node_id);
-		}
-
 		self.inner.peer_connected(counterparty_node_id, init_msg, inbound)
 	}
 }
