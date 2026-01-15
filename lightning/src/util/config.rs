@@ -154,14 +154,40 @@ pub struct ChannelHandshakeConfig {
 	///
 	/// Default value: `10_000` millionths (i.e., 1% of channel value)
 	///
-	/// Minimum value: If the calculated proportional value is less than `1000` sats, it will be
-	///                treated as `1000` sats instead, which is a safe implementation-specific lower
-	///                bound.
+	/// Minimum value: If the calculated proportional value is less than `min_their_channel_reserve_satoshis`,
+	///                it will be treated as `min_their_channel_reserve_satoshis` instead.
 	///
 	/// Maximum value: `1_000_000` (i.e., 100% of channel value. Any values larger than one million
 	///                will be treated as one million instead, although channel negotiations will
 	///                fail in that case.)
 	pub their_channel_reserve_proportional_millionths: u32,
+	/// The minimum absolute channel reserve value in satoshis that will be enforced regardless of
+	/// the proportional reserve calculation.
+	///
+	/// This ensures that even if the proportional reserve calculation results in a very small value
+	/// (or zero), at least this minimum amount will be required as a channel reserve. This provides
+	/// a safety mechanism to ensure some minimum reserve is always maintained.
+	///
+	/// **Special case: Setting to `0`**
+	///
+	/// Setting this value to `0` allows the counterparty to have no channel reserve, enabling them
+	/// to use their entire channel balance for payments. This is useful for LSP use cases where the
+	/// LSP wants to allow clients to be able to fully withdraw their funds from the channel without
+	/// closing it.
+	///
+	/// **Security Warning:**
+	///
+	/// When set to `0`, the channel reserve no longer provides economic security. If the counterparty
+	/// broadcasts a revoked state, there is no reserve to claim as punishment. This removes the
+	/// economic disincentive for the counterparty to attempt cheating. Only use this setting with
+	/// trusted counterparties (e.g., known LSP clients) or when other trust mechanisms are in place.
+	///
+	/// When set to `0`, the dust limit check is bypassed, allowing reserves below the protocol
+	/// minimum dust limit (354 sats). For any non-zero value below the dust limit, the dust limit
+	/// check will still be enforced.
+	///
+	/// Default value: `1000` sats
+	pub min_their_channel_reserve_satoshis: u64,
 	/// If set, we attempt to negotiate the `anchors_zero_fee_htlc_tx`option for all future
 	/// channels. This feature requires having a reserve of onchain funds readily available to bump
 	/// transactions in the event of a channel force close to avoid the possibility of losing funds.
@@ -254,6 +280,7 @@ impl Default for ChannelHandshakeConfig {
 			announce_for_forwarding: false,
 			commit_upfront_shutdown_pubkey: true,
 			their_channel_reserve_proportional_millionths: 10_000,
+			min_their_channel_reserve_satoshis: 1_000,
 			negotiate_anchors_zero_fee_htlc_tx: false,
 			negotiate_anchor_zero_fee_commitments: false,
 			our_max_accepted_htlcs: 50,
@@ -276,6 +303,7 @@ impl Readable for ChannelHandshakeConfig {
 			announce_for_forwarding: Readable::read(reader)?,
 			commit_upfront_shutdown_pubkey: Readable::read(reader)?,
 			their_channel_reserve_proportional_millionths: Readable::read(reader)?,
+			min_their_channel_reserve_satoshis: Readable::read(reader)?,
 			negotiate_anchors_zero_fee_htlc_tx: Readable::read(reader)?,
 			negotiate_anchor_zero_fee_commitments: Readable::read(reader)?,
 			our_max_accepted_htlcs: Readable::read(reader)?,
