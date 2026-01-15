@@ -910,6 +910,10 @@ pub const MAX_CHAN_DUST_LIMIT_SATOSHIS: u64 = MAX_STD_OUTPUT_DUST_LIMIT_SATOSHIS
 pub const MIN_CHAN_DUST_LIMIT_SATOSHIS: u64 = 354;
 
 // Just a reasonable implementation-specific safe lower bound, higher than the dust limit.
+// Deprecated: This constant is kept for backward compatibility.
+// The minimum channel reserve is now configurable via `ChannelHandshakeConfig::min_their_channel_reserve_satoshis`.
+// This constant retains its original value for API compatibility, but the actual behavior uses the config value.
+#[allow(dead_code)]
 pub const MIN_THEIR_CHAN_RESERVE_SATOSHIS: u64 = 1000;
 
 /// Used to return a simple Error back to ChannelManager. Will get converted to a
@@ -3489,9 +3493,10 @@ where
 			}
 		}
 
-		if holder_selected_channel_reserve_satoshis < MIN_CHAN_DUST_LIMIT_SATOSHIS {
-			// Protocol level safety check in place, although it should never happen because
-			// of `MIN_THEIR_CHAN_RESERVE_SATOSHIS`
+		// Allow bypassing dust limit when min_their_channel_reserve_satoshis is explicitly set to 0 (LSP use case)
+		if holder_selected_channel_reserve_satoshis < MIN_CHAN_DUST_LIMIT_SATOSHIS
+			&& config.channel_handshake_config.min_their_channel_reserve_satoshis > 0 {
+			// Protocol level safety check in place
 			return Err(ChannelError::close(format!("Suitable channel reserve not found. remote_channel_reserve was ({}). dust_limit_satoshis is ({}).", holder_selected_channel_reserve_satoshis, MIN_CHAN_DUST_LIMIT_SATOSHIS)));
 		}
 		if holder_selected_channel_reserve_satoshis * 1000 >= full_channel_value_msat {
@@ -3501,7 +3506,9 @@ where
 			log_debug!(logger, "channel_reserve_satoshis ({}) is smaller than our dust limit ({}). We can broadcast stale states without any risk, implying this channel is very insecure for our counterparty.",
 				msg_channel_reserve_satoshis, MIN_CHAN_DUST_LIMIT_SATOSHIS);
 		}
-		if holder_selected_channel_reserve_satoshis < open_channel_fields.dust_limit_satoshis {
+		// Allow bypassing dust limit when min_their_channel_reserve_satoshis is explicitly set to 0 (LSP use case)
+		if holder_selected_channel_reserve_satoshis < open_channel_fields.dust_limit_satoshis
+			&& config.channel_handshake_config.min_their_channel_reserve_satoshis > 0 {
 			return Err(ChannelError::close(format!("Dust limit ({}) too high for the channel reserve we require the remote to keep ({})", open_channel_fields.dust_limit_satoshis, holder_selected_channel_reserve_satoshis)));
 		}
 
@@ -4214,7 +4221,9 @@ where
 		if channel_reserve_satoshis > funding.get_value_satoshis() {
 			return Err(ChannelError::close(format!("Bogus channel_reserve_satoshis ({}). Must not be greater than ({})", channel_reserve_satoshis, funding.get_value_satoshis())));
 		}
-		if common_fields.dust_limit_satoshis > funding.holder_selected_channel_reserve_satoshis {
+		// Allow bypassing dust limit when holder_selected_channel_reserve_satoshis is 0 (LSP use case)
+		if common_fields.dust_limit_satoshis > funding.holder_selected_channel_reserve_satoshis
+			&& funding.holder_selected_channel_reserve_satoshis > 0 {
 			return Err(ChannelError::close(format!("Dust limit ({}) is bigger than our channel reserve ({})", common_fields.dust_limit_satoshis, funding.holder_selected_channel_reserve_satoshis)));
 		}
 		if channel_reserve_satoshis > funding.get_value_satoshis() - funding.holder_selected_channel_reserve_satoshis {
@@ -6474,14 +6483,16 @@ fn get_holder_max_htlc_value_in_flight_msat(
 /// Guaranteed to return a value no larger than channel_value_satoshis
 ///
 /// This is used both for outbound and inbound channels and has lower bound
-/// of `MIN_THEIR_CHAN_RESERVE_SATOSHIS`.
+/// of `ChannelHandshakeConfig::min_their_channel_reserve_satoshis`.
 ///
 /// Returns `Err` if `channel_value_satoshis` is smaller than
-/// `MIN_THEIR_CHAN_RESERVE_SATOSHIS`.
+/// `ChannelHandshakeConfig::min_their_channel_reserve_satoshis`.
 pub(crate) fn get_holder_selected_channel_reserve_satoshis(
 	channel_value_satoshis: u64, config: &UserConfig,
 ) -> Result<u64, ()> {
-	if channel_value_satoshis < MIN_THEIR_CHAN_RESERVE_SATOSHIS {
+	let min_their_channel_reserve_satoshis =
+		config.channel_handshake_config.min_their_channel_reserve_satoshis;
+	if channel_value_satoshis < min_their_channel_reserve_satoshis {
 		return Err(());
 	}
 	// As described in the `ChannelHandshakeConfig` docs, we cap this value at 1_000_000.
@@ -6491,7 +6502,7 @@ pub(crate) fn get_holder_selected_channel_reserve_satoshis(
 	);
 	let calculated_reserve =
 		channel_value_satoshis.saturating_mul(counterparty_chan_reserve_prop_mil) / 1_000_000;
-	Ok(cmp::max(calculated_reserve, MIN_THEIR_CHAN_RESERVE_SATOSHIS))
+	Ok(cmp::max(calculated_reserve, min_their_channel_reserve_satoshis))
 }
 
 /// This is for legacy reasons, present for forward-compatibility.
@@ -13446,10 +13457,11 @@ where
 	      L::Target: Logger,
 	{
 		let holder_selected_channel_reserve_satoshis = get_holder_selected_channel_reserve_satoshis(channel_value_satoshis, config)
-			.map_err(|()| APIError::APIMisuseError { err: format!("The channel value {channel_value_satoshis} is smaller than {MIN_THEIR_CHAN_RESERVE_SATOSHIS}")})?;
-		if holder_selected_channel_reserve_satoshis < MIN_CHAN_DUST_LIMIT_SATOSHIS {
-			// Protocol level safety check in place, although it should never happen because
-			// of `MIN_THEIR_CHAN_RESERVE_SATOSHIS`
+			.map_err(|()| APIError::APIMisuseError { err: format!("The channel value {channel_value_satoshis} is smaller than {}", config.channel_handshake_config.min_their_channel_reserve_satoshis)})?;
+		// Allow bypassing dust limit when min_their_channel_reserve_satoshis is explicitly set to 0 (LSP use case)
+		if holder_selected_channel_reserve_satoshis < MIN_CHAN_DUST_LIMIT_SATOSHIS
+			&& config.channel_handshake_config.min_their_channel_reserve_satoshis > 0 {
+			// Protocol level safety check in place
 			return Err(APIError::APIMisuseError { err: format!("Holder selected channel reserve below \
 				implemention limit dust_limit_satoshis {}", holder_selected_channel_reserve_satoshis) });
 		}
@@ -13819,7 +13831,7 @@ where
 		let channel_type = channel_type_from_open_channel(&msg.common_fields, our_supported_features)?;
 
 		let holder_selected_channel_reserve_satoshis = get_holder_selected_channel_reserve_satoshis(msg.common_fields.funding_satoshis, config)
-			.map_err(|()| ChannelError::close(format!("The channel value {} is smaller than {MIN_THEIR_CHAN_RESERVE_SATOSHIS}", msg.common_fields.funding_satoshis)))?;
+			.map_err(|()| ChannelError::close(format!("The channel value {} is smaller than {}", msg.common_fields.funding_satoshis, config.channel_handshake_config.min_their_channel_reserve_satoshis)))?;
 		let counterparty_pubkeys = ChannelPublicKeys {
 			funding_pubkey: msg.common_fields.funding_pubkey,
 			revocation_basepoint: RevocationBasepoint::from(msg.common_fields.revocation_basepoint),
@@ -16266,7 +16278,7 @@ mod tests {
 		test_self_and_counterparty_channel_reserve(10_000_000, 0.60, 0.30);
 
 		// Test with calculated channel reserve less than lower bound
-		// i.e `MIN_THEIR_CHAN_RESERVE_SATOSHIS`
+		// i.e `ChannelHandshakeConfig::min_their_channel_reserve_satoshis`
 		test_self_and_counterparty_channel_reserve(100_000, 0.00002, 0.30);
 
 		// Test with invalid channel reserves since sum of both is greater than or equal
@@ -16308,7 +16320,7 @@ mod tests {
 			1.0
 		};
 
-		let expected_outbound_selected_chan_reserve = cmp::max(MIN_THEIR_CHAN_RESERVE_SATOSHIS, (chan.funding.get_value_satoshis() as f64 * outbound_capped_reserve_perc) as u64);
+		let expected_outbound_selected_chan_reserve = cmp::max(outbound_node_config.channel_handshake_config.min_their_channel_reserve_satoshis, (chan.funding.get_value_satoshis() as f64 * outbound_capped_reserve_perc) as u64);
 		assert_eq!(chan.funding.holder_selected_channel_reserve_satoshis, expected_outbound_selected_chan_reserve);
 
 		let chan_open_channel_msg = chan.get_open_channel(ChainHash::using_genesis_block(network), &&logger).unwrap();
@@ -16318,7 +16330,7 @@ mod tests {
 		if outbound_selected_channel_reserve_perc + inbound_selected_channel_reserve_perc < 1.0 {
 			let chan_inbound_node = InboundV1Channel::<&TestKeysInterface>::new(&&fee_est, &&keys_provider, &&keys_provider, inbound_node_id, &channelmanager::provided_channel_type_features(&inbound_node_config), &channelmanager::provided_init_features(&outbound_node_config), &chan_open_channel_msg, 7, &inbound_node_config, 0, &&logger, /*is_0conf=*/false).unwrap();
 
-			let expected_inbound_selected_chan_reserve = cmp::max(MIN_THEIR_CHAN_RESERVE_SATOSHIS, (chan.funding.get_value_satoshis() as f64 * inbound_capped_reserve_perc) as u64);
+			let expected_inbound_selected_chan_reserve = cmp::max(inbound_node_config.channel_handshake_config.min_their_channel_reserve_satoshis, (chan.funding.get_value_satoshis() as f64 * inbound_capped_reserve_perc) as u64);
 
 			assert_eq!(chan_inbound_node.funding.holder_selected_channel_reserve_satoshis, expected_inbound_selected_chan_reserve);
 			assert_eq!(chan_inbound_node.funding.counterparty_selected_channel_reserve_satoshis.unwrap(), expected_outbound_selected_chan_reserve);
@@ -16326,6 +16338,62 @@ mod tests {
 			// Channel Negotiations failed
 			let result = InboundV1Channel::<&TestKeysInterface>::new(&&fee_est, &&keys_provider, &&keys_provider, inbound_node_id, &channelmanager::provided_channel_type_features(&inbound_node_config), &channelmanager::provided_init_features(&outbound_node_config), &chan_open_channel_msg, 7, &inbound_node_config, 0, &&logger, /*is_0conf=*/false);
 			assert!(result.is_err());
+		}
+	}
+
+	#[test]
+	#[rustfmt::skip]
+	fn test_configurable_min_channel_reserve() {
+		let test_est = TestFeeEstimator::new(15000);
+		let fee_est = LowerBoundedFeeEstimator::new(&test_est);
+		let logger = test_utils::TestLogger::new();
+		let secp_ctx = Secp256k1::new();
+		let keys_provider = test_utils::TestKeysInterface::new(&[42; 32], Network::Testnet);
+		let outbound_node_id = PublicKey::from_secret_key(&secp_ctx, &SecretKey::from_slice(&[42; 32]).unwrap());
+
+		// Test with min_their_channel_reserve_satoshis set to 0 (LSP use case)
+		let mut config = UserConfig::default();
+		config.channel_handshake_config.min_their_channel_reserve_satoshis = 0;
+		config.channel_handshake_config.their_channel_reserve_proportional_millionths = 0;
+
+		let chan = OutboundV1Channel::<&TestKeysInterface>::new(
+			&fee_est, &&keys_provider, &&keys_provider, outbound_node_id,
+			&channelmanager::provided_init_features(&config),
+			1_000_000, 100_000, 42, &config, 0, 42, None, &logger
+		).unwrap();
+
+		// With 0 minimum and 0 proportional, reserve should be 0 (bypasses dust limit)
+		assert_eq!(chan.funding.holder_selected_channel_reserve_satoshis, 0);
+
+		// Test with custom minimum enforced when proportional is lower
+		config.channel_handshake_config.min_their_channel_reserve_satoshis = 10_000;
+		config.channel_handshake_config.their_channel_reserve_proportional_millionths = 10_000; // 1%
+
+		let chan_small = OutboundV1Channel::<&TestKeysInterface>::new(
+			&fee_est, &&keys_provider, &&keys_provider, outbound_node_id,
+			&channelmanager::provided_init_features(&config),
+			100_000, 100_000, 42, &config, 0, 42, None, &logger
+		).unwrap();
+
+		// Proportional would be 1% of 100k = 1000, but minimum is 10000, so 10000 should be used
+		assert_eq!(chan_small.funding.holder_selected_channel_reserve_satoshis, 10_000);
+
+		// Test that dust limit is still enforced when min_their_channel_reserve_satoshis is non-zero but below dust limit
+		config.channel_handshake_config.min_their_channel_reserve_satoshis = 100; // Below dust limit of 354
+		config.channel_handshake_config.their_channel_reserve_proportional_millionths = 0;
+
+		let result = OutboundV1Channel::<&TestKeysInterface>::new(
+			&fee_est, &&keys_provider, &&keys_provider, outbound_node_id,
+			&channelmanager::provided_init_features(&config),
+			1_000_000, 100_000, 42, &config, 0, 42, None, &logger
+		);
+
+		// Should fail because 100 < 354 (dust limit) and min_their_channel_reserve_satoshis > 0
+		assert!(result.is_err());
+		if let Err(APIError::APIMisuseError { err }) = result {
+			assert!(err.contains("dust_limit_satoshis"));
+		} else {
+			panic!("Expected APIMisuseError");
 		}
 	}
 
