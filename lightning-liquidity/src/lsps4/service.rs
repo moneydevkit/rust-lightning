@@ -53,6 +53,7 @@ const HTLC_EXPIRY_THRESHOLD_SECS: u64 = 10;
 use crate::utils::async_poll::dummy_waker;
 use core::task;
 use std::future::Future;
+use std::time::Instant;
 
 /// Action to forward a specific HTLC through a channel
 #[derive(Debug)]
@@ -147,18 +148,21 @@ where
 		&self, intercept_scid: u64, intercept_id: InterceptId, expected_outbound_amount_msat: u64,
 		payment_hash: PaymentHash,
 	) -> Result<(), APIError> {
+		let fn_start = Instant::now();
 		log_info!(
 			self.logger,
-			"[LSPS4] HTLC intercepted - SCID: {}, intercept_id: {:?}, amount: {} msat, payment_hash: {}",
+			"TIMING: [LSPS4] htlc_intercepted START - SCID: {}, intercept_id: {:?}, amount: {} msat, payment_hash: {}",
 			intercept_scid,
 			intercept_id,
 			expected_outbound_amount_msat,
 			payment_hash
 		);
+		let step_start = Instant::now();
 		if let Some(counterparty_node_id) = self.scid_store.get_peer(intercept_scid) {
 			log_info!(
 				self.logger,
-				"[LSPS4] SCID {} matched to peer {}, processing HTLC",
+				"TIMING: [LSPS4] htlc_intercepted scid_store.get_peer() took {}ms - SCID {} matched to peer {}",
+				step_start.elapsed().as_millis(),
 				intercept_scid,
 				counterparty_node_id
 			);
@@ -173,10 +177,12 @@ where
 			if !self.is_peer_connected(&counterparty_node_id) {
 				log_debug!(
 					self.logger,
-					"[htlc_intercepted] Peer {} not connected, storing HTLC and sending webhook",
+					"TIMING: [htlc_intercepted] Peer {} not connected, storing HTLC and sending webhook",
 					counterparty_node_id
 				);
+				let store_start = Instant::now();
 				self.htlc_store.insert(htlc).unwrap(); // TODO: handle persistence failures
+				log_info!(self.logger, "TIMING: [LSPS4] htlc_intercepted htlc_store.insert() took {}ms", store_start.elapsed().as_millis());
 				let mut event_queue_notifier = self.pending_events.notifier();
 				event_queue_notifier.enqueue(crate::events::LiquidityEvent::LSPS4Service(LSPS4ServiceEvent::SendWebhook {
 					counterparty_node_id: counterparty_node_id.clone(),
@@ -184,24 +190,30 @@ where
 			} else {
 				log_debug!(
 					self.logger,
-					"[htlc_intercepted] Peer {} connected, processing HTLC immediately",
+					"TIMING: [htlc_intercepted] Peer {} connected, processing HTLC immediately",
 					counterparty_node_id
 				);
+				let calc_start = Instant::now();
 				let actions =
 					self.calculate_htlc_actions_for_peer(counterparty_node_id, vec![htlc.clone()]);
+				log_info!(self.logger, "TIMING: [LSPS4] htlc_intercepted calculate_htlc_actions_for_peer() took {}ms", calc_start.elapsed().as_millis());
 
 				if actions.new_channel_needed_msat.is_some() {
+					let store_start = Instant::now();
 					self.htlc_store.insert(htlc).unwrap(); // TODO: handle persistence failures
+					log_info!(self.logger, "TIMING: [LSPS4] htlc_intercepted htlc_store.insert() took {}ms", store_start.elapsed().as_millis());
 				}
 
 				log_debug!(
 					self.logger,
-					"[htlc_intercepted] Calculated actions for peer {}: {:?}",
+					"TIMING: [htlc_intercepted] Calculated actions for peer {}: {:?}",
 					counterparty_node_id,
 					actions
 				);
 
+				let exec_start = Instant::now();
 				self.execute_htlc_actions(actions, counterparty_node_id.clone());
+				log_info!(self.logger, "TIMING: [LSPS4] htlc_intercepted execute_htlc_actions() took {}ms", exec_start.elapsed().as_millis());
 			}
 		} else {
 			log_error!(
@@ -211,9 +223,10 @@ where
 					intercept_id
 				);
 		}
-		log_debug!(
+		log_info!(
 			self.logger,
-			"[htlc_intercepted] Finalizing htlc_intercepted for intercept_scid {}",
+			"TIMING: [LSPS4] htlc_intercepted TOTAL took {}ms for intercept_scid {}",
+			fn_start.elapsed().as_millis(),
 			intercept_scid
 		);
 
@@ -295,31 +308,42 @@ where
 	fn handle_register_node_request(
 		&self, request_id: LSPSRequestId, counterparty_node_id: &PublicKey, _params: RegisterNodeRequest,
 	) -> Result<(), LightningError> {
+		let fn_start = Instant::now();
 		log_info!(
 			self.logger,
-			"[LSPS4] Received RegisterNodeRequest from {} with request_id {:?}",
+			"TIMING: [LSPS4] handle_register_node_request START from {} with request_id {:?}",
 			counterparty_node_id,
 			request_id
 		);
 
+		let step_start = Instant::now();
 		let intercept_scid = match self.scid_store.get_scid(counterparty_node_id) {
 			Some(intercept_scid) => {
 				log_info!(
 					self.logger,
-					"[LSPS4] Found existing intercept SCID {} for peer {}",
+					"TIMING: [LSPS4] handle_register_node_request scid_store.get_scid() took {}ms - Found existing intercept SCID {} for peer {}",
+					step_start.elapsed().as_millis(),
 					intercept_scid,
 					counterparty_node_id
 				);
 				intercept_scid
 			},
 			None => {
+				log_info!(
+					self.logger,
+					"TIMING: [LSPS4] handle_register_node_request scid_store.get_scid() took {}ms - No existing SCID",
+					step_start.elapsed().as_millis()
+				);
+				let gen_start = Instant::now();
 				let intercept_scid = self.channel_manager.get_cm().get_intercept_scid();
 				log_info!(
 					self.logger,
-					"[LSPS4] Generated NEW intercept SCID {} for peer {}",
+					"TIMING: [LSPS4] handle_register_node_request get_intercept_scid() took {}ms - Generated NEW intercept SCID {} for peer {}",
+					gen_start.elapsed().as_millis(),
 					intercept_scid,
 					counterparty_node_id
 				);
+				let store_start = Instant::now();
 				self.scid_store.add_intercepted_scid(intercept_scid, counterparty_node_id.clone())
 					.map_err(|e| {
 						log_error!(
@@ -336,7 +360,8 @@ where
 					})?;
 				log_info!(
 					self.logger,
-					"[LSPS4] Successfully stored intercept SCID {} for peer {}",
+					"TIMING: [LSPS4] handle_register_node_request scid_store.add_intercepted_scid() took {}ms - Successfully stored intercept SCID {} for peer {}",
+					store_start.elapsed().as_millis(),
 					intercept_scid,
 					counterparty_node_id
 				);
@@ -360,7 +385,8 @@ where
 
 		log_info!(
 			self.logger,
-			"[LSPS4] RegisterNodeResponse enqueued successfully for peer {}",
+			"TIMING: [LSPS4] handle_register_node_request TOTAL took {}ms for peer {}",
+			fn_start.elapsed().as_millis(),
 			counterparty_node_id
 		);
 
@@ -474,6 +500,9 @@ where
 	pub(crate) fn execute_htlc_actions(
 		&self, actions: HtlcProcessingActions, their_node_id: PublicKey,
 	) {
+		let fn_start = Instant::now();
+		log_info!(self.logger, "TIMING: [LSPS4] execute_htlc_actions START for peer {} with {} forwards", their_node_id, actions.forwards.len());
+
 		// Execute forwards
 		for forward_action in actions.forwards {
 			log_debug!(
@@ -485,6 +514,7 @@ where
 				forward_action.skimmed_fee_msat
 			);
 
+			let fwd_start = Instant::now();
 			if let Err(e) = self.channel_manager.get_cm().forward_intercepted_htlc(
 				forward_action.htlc.id(),
 				&forward_action.channel_id,
@@ -493,18 +523,21 @@ where
 			) {
 				log_error!(self.logger, "Failed to forward intercepted HTLC: {:?}", e);
 			}
+			log_info!(self.logger, "TIMING: [LSPS4] execute_htlc_actions forward_intercepted_htlc() took {}ms", fwd_start.elapsed().as_millis());
 
 			// Remove the HTLC from store after forwarding
+			let rm_start = Instant::now();
 			if let Err(e) = self.htlc_store.remove(&forward_action.htlc.id()) {
 				log_error!(self.logger, "Failed to remove intercepted HTLC from store: {}", e);
 			}
+			log_info!(self.logger, "TIMING: [LSPS4] execute_htlc_actions htlc_store.remove() took {}ms", rm_start.elapsed().as_millis());
 		}
 
 		// Handle new channel opening
 		if let Some(channel_size_msat) = actions.new_channel_needed_msat {
 			log_info!(
 				self.logger,
-				"Need a new channel with peer {} for {}msat to forward HTLCs",
+				"TIMING: [LSPS4] execute_htlc_actions Need a new channel with peer {} for {}msat to forward HTLCs",
 				their_node_id,
 				channel_size_msat
 			);
@@ -516,18 +549,27 @@ where
 				channel_count: actions.channel_count,
 			}));
 		}
+
+		log_info!(self.logger, "TIMING: [LSPS4] execute_htlc_actions TOTAL took {}ms", fn_start.elapsed().as_millis());
 	}
 
 	/// Convenience function that calculates and executes HTLC actions in one call
 	pub(crate) fn process_htlcs_for_peer(
 		&self, their_node_id: PublicKey, htlcs: Vec<InterceptedHtlc>,
 	) {
+		let fn_start = Instant::now();
+		let htlc_count = htlcs.len();
+		log_info!(self.logger, "TIMING: [LSPS4] process_htlcs_for_peer START for peer {} with {} HTLCs", their_node_id, htlc_count);
+
+		let calc_start = Instant::now();
 		let actions = self.calculate_htlc_actions_for_peer(their_node_id, htlcs);
+		log_info!(self.logger, "TIMING: [LSPS4] process_htlcs_for_peer calculate_htlc_actions_for_peer() took {}ms", calc_start.elapsed().as_millis());
 
 		log_info!(self.logger, "Calculated actions for peer {}: {:?}", their_node_id, actions);
 
 		if actions.is_empty() {
 			log_debug!(self.logger, "No HTLCs to process for peer {}", their_node_id);
+			log_info!(self.logger, "TIMING: [LSPS4] process_htlcs_for_peer TOTAL took {}ms (no actions)", fn_start.elapsed().as_millis());
 			return;
 		}
 
@@ -542,6 +584,7 @@ where
 		}
 
 		self.execute_htlc_actions(actions, their_node_id);
+		log_info!(self.logger, "TIMING: [LSPS4] process_htlcs_for_peer TOTAL took {}ms", fn_start.elapsed().as_millis());
 	}
 
 	/// Persists the state of the service handler towards the given [`KVStore`] implementation.

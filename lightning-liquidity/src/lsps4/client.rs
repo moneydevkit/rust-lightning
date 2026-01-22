@@ -28,6 +28,7 @@ use std::string::String;
 
 use core::default::Default;
 use core::ops::Deref;
+use std::time::Instant;
 
 use crate::lsps4::msgs::{
 	RegisterNodeRequest, RegisterNodeResponse, LSPS4Message, LSPS4Request,
@@ -89,14 +90,19 @@ where
 	pub fn register_node(
 		&self, counterparty_node_id: PublicKey
 	) -> Result<LSPSRequestId, APIError> {
+		let fn_start = Instant::now();
+		eprintln!("TIMING: [LSPS4 Client] register_node START for peer {}", counterparty_node_id);
+
 		let request_id = crate::utils::generate_request_id(&self.entropy_source);
 
 		{
+			let step_start = Instant::now();
 			let mut outer_state_lock = self.per_peer_state.write().unwrap();
 			let inner_state_lock = outer_state_lock
 				.entry(counterparty_node_id)
 				.or_insert(Mutex::new(PeerState::new()));
 			let mut peer_state_lock = inner_state_lock.lock().unwrap();
+			eprintln!("TIMING: [LSPS4 Client] register_node state lock acquisition took {}ms", step_start.elapsed().as_millis());
 
 			if !peer_state_lock
 				.pending_register_node_requests
@@ -114,6 +120,7 @@ where
 		let mut message_queue_notifier = self.pending_messages.notifier();
 		message_queue_notifier.enqueue(&counterparty_node_id, msg);
 
+		eprintln!("TIMING: [LSPS4 Client] register_node TOTAL took {}ms", fn_start.elapsed().as_millis());
 		Ok(request_id)
 	}
 
@@ -121,6 +128,9 @@ where
 	fn handle_register_node_response(
 		&self, request_id: LSPSRequestId, counterparty_node_id: &PublicKey, result: RegisterNodeResponse,
 	) -> Result<(), LightningError> {
+		let fn_start = Instant::now();
+		eprintln!("TIMING: [LSPS4 Client] handle_register_node_response START from peer {} with SCID {:?}", counterparty_node_id, result.jit_channel_scid);
+
 		let outer_state_lock = self.per_peer_state.read().unwrap();
 		match outer_state_lock.get(counterparty_node_id) {
 			Some(inner_state_lock) => {
@@ -146,6 +156,7 @@ where
 							cltv_expiry_delta: result.lsp_cltv_expiry_delta,
 						},
 					));
+					eprintln!("TIMING: [LSPS4 Client] handle_register_node_response TOTAL took {}ms - InvoiceParametersReady event enqueued with SCID {}", fn_start.elapsed().as_millis(), intercept_scid);
 				} else {
 					return Err(LightningError {
 						err: format!(

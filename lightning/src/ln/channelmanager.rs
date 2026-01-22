@@ -184,6 +184,8 @@ use core::ops::Deref;
 use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use core::time::Duration;
 use core::{cmp, mem};
+#[cfg(feature = "std")]
+use crate::util::time::Instant;
 // Re-export this for use in the public API.
 #[cfg(any(test, feature = "_externalize_tests"))]
 pub(crate) use crate::ln::outbound_payment::PaymentSendFailure;
@@ -7094,6 +7096,9 @@ where
 	/// Users implementing their own background processing logic should call this in irregular,
 	/// randomly-distributed intervals.
 	pub fn process_pending_htlc_forwards(&self) {
+		#[cfg(feature = "std")]
+		let fn_start = Instant::now();
+
 		if self
 			.pending_htlc_forwards_processor
 			.compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
@@ -7107,6 +7112,9 @@ where
 		});
 
 		self.pending_htlc_forwards_processor.store(false, Ordering::Release);
+
+		#[cfg(feature = "std")]
+		log_trace!(self.logger, "TIMING: process_pending_htlc_forwards() took {}ms", fn_start.elapsed().as_millis());
 	}
 
 	// Returns whether or not we need to re-persist.

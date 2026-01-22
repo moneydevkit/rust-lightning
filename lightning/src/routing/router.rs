@@ -39,6 +39,7 @@ use crate::util::ser::{Readable, ReadableArgs, Writeable, Writer};
 
 use crate::io;
 use crate::prelude::*;
+use crate::util::time::Instant;
 use alloc::collections::BinaryHeap;
 use core::ops::Deref;
 use core::{cmp, fmt};
@@ -2423,10 +2424,24 @@ pub fn find_route<L: Deref, GL: Deref, S: ScoreLookUp>(
 	scorer: &S, score_params: &S::ScoreParams, random_seed_bytes: &[u8; 32]
 ) -> Result<Route, &'static str>
 where L::Target: Logger, GL::Target: Logger {
+	let fn_start = Instant::now();
+	log_trace!(logger, "TIMING: find_route() START final_value_msat={}", route_params.final_value_msat);
+
+	let step_start = Instant::now();
 	let graph_lock = network_graph.read_only();
+	let graph_lock_time = step_start.elapsed().as_millis();
+
+	let step_start = Instant::now();
 	let mut route = get_route(our_node_pubkey, &route_params, &graph_lock, first_hops, logger,
 		scorer, score_params, random_seed_bytes)?;
+	let get_route_time = step_start.elapsed().as_millis();
+
 	add_random_cltv_offset(&mut route, &route_params.payment_params, &graph_lock, random_seed_bytes);
+	let total_time = fn_start.elapsed().as_millis();
+	let path_count = route.paths.len();
+
+	#[cfg(feature = "std")]
+	eprintln!("TIMING: find_route() network_graph.read_only() took {}ms, get_route() took {}ms, TOTAL took {}ms paths={}", graph_lock_time, get_route_time, total_time, path_count);
 	Ok(route)
 }
 
@@ -3722,6 +3737,7 @@ where L::Target: Logger {
 	}
 
 	log_info!(logger, "Got route: {}", log_route!(route));
+	log_trace!(logger, "TIMING: get_route() completed with {} paths", route.paths.len());
 	Ok(route)
 }
 

@@ -1426,6 +1426,10 @@ where
 		L::Target: Logger,
 		IH: Fn() -> InFlightHtlcs,
 	{
+		#[cfg(feature = "std")]
+		let fn_start = Instant::now();
+		log_trace!(self.logger, "TIMING: find_initial_route() START payment_id={} final_value_msat={}", payment_id, route_params.final_value_msat);
+
 		#[cfg(feature = "std")] {
 			if has_expired(&route_params) {
 				log_error!(self.logger, "Payment with id {} and hash {} had expired before we started paying",
@@ -1443,6 +1447,8 @@ where
 				RetryableSendFailure::OnionPacketSizeExceeded
 			})?;
 
+		#[cfg(feature = "std")]
+		let route_start = Instant::now();
 		let mut route = router.find_route_with_id(
 			&node_signer.get_node_id(Recipient::Node).unwrap(), route_params,
 			Some(&first_hops.iter().collect::<Vec<_>>()), inflight_htlcs(),
@@ -1452,6 +1458,8 @@ where
 				payment_id, payment_hash);
 			RetryableSendFailure::RouteNotFound
 		})?;
+		#[cfg(feature = "std")]
+		log_trace!(self.logger, "TIMING: find_initial_route() router.find_route_with_id() took {}ms", route_start.elapsed().as_millis());
 
 		if route.route_params.as_ref() != Some(route_params) {
 			debug_assert!(false,
@@ -1460,6 +1468,8 @@ where
 			route.route_params = Some(route_params.clone());
 		}
 
+		#[cfg(feature = "std")]
+		log_trace!(self.logger, "TIMING: find_initial_route() TOTAL took {}ms paths={}", fn_start.elapsed().as_millis(), route.paths.len());
 		Ok(route)
 	}
 
