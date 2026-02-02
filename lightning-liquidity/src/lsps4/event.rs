@@ -12,6 +12,8 @@
 use crate::lsps0::ser::LSPSRequestId;
 use std::string::String;
 use std::vec::Vec;
+use lightning_types::payment::PaymentHash;
+
 
 
 use bitcoin::secp256k1::PublicKey;
@@ -47,6 +49,8 @@ pub enum LSPS4ServiceEvent {
 	SendWebhook {
 		/// The node id of the counterparty.
 		counterparty_node_id: PublicKey,
+		/// The payment hash
+		payment_hash: PaymentHash,
 	},
 	/// You should open a channel using [`ChannelManager::create_channel`].
 	///
