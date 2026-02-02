@@ -180,6 +180,7 @@ where
 				let mut event_queue_notifier = self.pending_events.notifier();
 				event_queue_notifier.enqueue(crate::events::LiquidityEvent::LSPS4Service(LSPS4ServiceEvent::SendWebhook {
 					counterparty_node_id: counterparty_node_id.clone(),
+					payment_hash,
 				}));
 			} else {
 				log_debug!(
