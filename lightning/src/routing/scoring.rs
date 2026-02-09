@@ -790,17 +790,17 @@ pub struct ProbabilisticScoringFeeParameters {
 impl Default for ProbabilisticScoringFeeParameters {
 	fn default() -> Self {
 		Self {
-			base_penalty_msat: 1024,
+			base_penalty_msat: 50_000,  // 50 sats per hop - strongly prefer shorter routes
 			base_penalty_amount_multiplier_msat: 131_072,
-			liquidity_penalty_multiplier_msat: 0,
-			liquidity_penalty_amount_multiplier_msat: 0,
+			liquidity_penalty_multiplier_msat: 10_000,  // Penalize based on real-time liquidity bounds
+			liquidity_penalty_amount_multiplier_msat: 1_250,  // Amount-weighted liquidity penalty
 			manual_node_penalties: new_hash_map(),
 			anti_probing_penalty_msat: 250,
 			considered_impossible_penalty_msat: 1_0000_0000_000,
 			historical_liquidity_penalty_multiplier_msat: 10_000,
 			historical_liquidity_penalty_amount_multiplier_msat: 1_250,
 			linear_success_probability: false,
-			probing_diversity_penalty_msat: 0,
+			probing_diversity_penalty_msat: 500, // Encourage path diversity during probing
 		}
 	}
 }
