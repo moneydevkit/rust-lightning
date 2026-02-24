@@ -177,11 +177,24 @@ where
 					counterparty_node_id
 				);
 				self.htlc_store.insert(htlc).unwrap(); // TODO: handle persistence failures
-				let mut event_queue_notifier = self.pending_events.notifier();
-				event_queue_notifier.enqueue(crate::events::LiquidityEvent::LSPS4Service(LSPS4ServiceEvent::SendWebhook {
-					counterparty_node_id: counterparty_node_id.clone(),
-					payment_hash,
-				}));
+				// Re-check: the peer may have reconnected while we were persisting.
+				// If so, peer_connected() already ran and found 0 HTLCs (race).
+				// Process the stored HTLC now instead of relying on the webhook.
+				if self.is_peer_connected(&counterparty_node_id) {
+					log_info!(
+						self.logger,
+						"[htlc_intercepted] Peer {} reconnected during HTLC store, processing immediately",
+						counterparty_node_id
+					);
+					let htlcs = self.htlc_store.get_htlcs_by_node_id(&counterparty_node_id);
+					self.process_htlcs_for_peer(counterparty_node_id.clone(), htlcs);
+				} else {
+					let mut event_queue_notifier = self.pending_events.notifier();
+					event_queue_notifier.enqueue(crate::events::LiquidityEvent::LSPS4Service(LSPS4ServiceEvent::SendWebhook {
+						counterparty_node_id: counterparty_node_id.clone(),
+						payment_hash,
+					}));
+				}
 			} else {
 				log_debug!(
 					self.logger,
