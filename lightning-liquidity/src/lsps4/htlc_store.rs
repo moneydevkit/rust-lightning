@@ -139,21 +139,23 @@ where L::Target: Logger, KV::Target: KVStoreSync {
 	}
 
 	pub(crate) fn insert(&self, htlc: InterceptedHtlc) -> Result<bool, io::Error> {
-		// Check if already exists
+		// Insert into the in-memory map first for immediate visibility to other threads
+		// (e.g., peer_connected checking for pending HTLCs). Then persist to S3 for durability.
 		{
-			let locked_htlcs = self.htlcs.lock().unwrap();
+			let mut locked_htlcs = self.htlcs.lock().unwrap();
 			if locked_htlcs.contains_key(&htlc.id()) {
 				return Ok(false);
 			}
+			locked_htlcs.insert(htlc.id(), htlc.clone());
 		}
 
-		// Persist first (outside the lock)
-		self.persist(&htlc)?;
+		// Persist to durable storage. If this fails, remove from the map to stay consistent.
+		if let Err(e) = self.persist(&htlc) {
+			self.htlcs.lock().unwrap().remove(&htlc.id());
+			return Err(e);
+		}
 
-		// Then insert into the map
-		let mut locked_htlcs = self.htlcs.lock().unwrap();
-		let updated = locked_htlcs.insert(htlc.id(), htlc).is_some();
-		Ok(updated)
+		Ok(true)
 	}
 
 	pub(crate) fn remove(&self, id: &InterceptId) -> Result<(), io::Error> {
