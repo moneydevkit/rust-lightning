@@ -6731,12 +6731,25 @@ where
 			match peer_state.channel_by_id.get(next_hop_channel_id) {
 				Some(chan) => {
 					if let Some(funded_chan) = chan.as_funded() {
-						if !funded_chan.context.is_usable() {
+						let is_usable = funded_chan.context.is_usable();
+						let is_live = funded_chan.context.is_live();
+						let is_connected = funded_chan.context.is_connected();
+						log_info!(entry_logger,
+							"forward_intercepted_htlc: channel {} - is_usable: {}, is_live: {}, is_connected: {}, peer_state.is_connected: {}",
+							next_hop_channel_id, is_usable, is_live, is_connected, peer_state.is_connected
+						);
+						if !is_usable {
 							return Err(APIError::ChannelUnavailable {
 								err: format!(
 									"Channel with id {next_hop_channel_id} not fully established"
 								),
 							});
+						}
+						if !is_live {
+							log_info!(entry_logger,
+								"forward_intercepted_htlc: WARNING - channel {} is_usable but NOT is_live (peer_disconnected flag set). HTLC will be queued but will fail at send_htlc time.",
+								next_hop_channel_id
+							);
 						}
 						funded_chan.context.outbound_scid_alias()
 					} else {
@@ -7500,8 +7513,10 @@ where
 						} else {
 							"alternate"
 						};
-					log_trace!(logger, "Forwarding HTLC from SCID {} with payment_hash {} and next hop SCID {} over {} channel {} with corresponding peer {}",
-						prev_outbound_scid_alias, &payment_hash, short_chan_id, channel_description, optimal_channel.context.channel_id(), &counterparty_node_id);
+					log_info!(logger, "process_forward_htlcs: forwarding HTLC from SCID {} with payment_hash {} and next hop SCID {} over {} channel {} with peer {} - is_live: {}, is_usable: {}, is_connected: {}",
+						prev_outbound_scid_alias, &payment_hash, short_chan_id, channel_description,
+						optimal_channel.context.channel_id(), &counterparty_node_id,
+						optimal_channel.context.is_live(), optimal_channel.context.is_usable(), optimal_channel.context.is_connected());
 					if let Err((reason, msg)) = optimal_channel.queue_add_htlc(
 						*outgoing_amt_msat,
 						*payment_hash,
