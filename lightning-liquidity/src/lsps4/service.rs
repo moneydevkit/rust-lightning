@@ -49,7 +49,7 @@ use std::string::String;
 use std::time::Instant;
 use std::vec::Vec;
 
-const HTLC_EXPIRY_THRESHOLD_SECS: u64 = 10;
+const HTLC_EXPIRY_THRESHOLD_SECS: u64 = 30;
 
 /// Action to forward a specific HTLC through a channel
 #[derive(Debug)]
@@ -370,7 +370,20 @@ where
 			}
 		}
 
-		self.process_htlcs_for_peer(counterparty_node_id.clone(), htlcs);
+		// Only attempt forwarding if at least one channel is live (is_usable).
+		// At peer_connected time, ChannelReestablish hasn't completed yet,
+		// so channels are typically not usable. The periodic retry will pick
+		// these up once channels become live.
+		let has_usable_channel = channels.iter().any(|ch| ch.is_usable);
+		if has_usable_channel {
+			self.process_htlcs_for_peer(counterparty_node_id.clone(), htlcs);
+		} else if htlc_count > 0 {
+			log_info!(
+				self.logger,
+				"[LSPS4] peer_connected: skipping HTLC forwarding for {} - no usable channels yet. Periodic retry will handle it.",
+				counterparty_node_id
+			);
+		}
 
 		log_info!(
 			self.logger,
@@ -423,6 +436,47 @@ where
 					e
 				);
 			}
+		}
+	}
+
+	/// Try to forward all pending stored HTLCs for peers that are connected and have
+	/// usable channels. Called periodically from the poll loop to catch the window
+	/// after ChannelReestablish completes (when peer_connected couldn't forward).
+	pub fn try_forward_pending_htlcs(&self) {
+		let peer_ids = self.htlc_store.get_all_peer_node_ids();
+		if peer_ids.is_empty() {
+			return;
+		}
+
+		let connected_peers = self.connected_peers.read().unwrap().clone();
+
+		for peer_id in peer_ids {
+			if !connected_peers.contains(&peer_id) {
+				continue;
+			}
+
+			let channels = self
+				.channel_manager
+				.get_cm()
+				.list_channels_with_counterparty(&peer_id);
+			let has_usable_channel = channels.iter().any(|ch| ch.is_usable);
+			if !has_usable_channel {
+				continue;
+			}
+
+			let htlcs = self.htlc_store.get_htlcs_by_node_id(&peer_id);
+			if htlcs.is_empty() {
+				continue;
+			}
+
+			log_info!(
+				self.logger,
+				"[LSPS4] try_forward_pending_htlcs: forwarding {} HTLCs for peer {} (channel now live)",
+				htlcs.len(),
+				peer_id
+			);
+
+			self.process_htlcs_for_peer(peer_id, htlcs);
 		}
 	}
 
@@ -705,38 +759,49 @@ where
 				Ok(()) => {
 					log_info!(
 						self.logger,
-						"[LSPS4] execute_htlc_actions: forward_intercepted_htlc returned Ok for HTLC {:?} (took {}ms). NOTE: Ok does NOT guarantee delivery - channel may still be reestablishing.",
+						"[LSPS4] execute_htlc_actions: forward_intercepted_htlc returned Ok for HTLC {:?} (took {}ms)",
 						forward_action.htlc.id(),
 						fwd_start.elapsed().as_millis()
 					);
+
+					// Only remove from store on successful forward
+					match self.htlc_store.remove(&forward_action.htlc.id()) {
+						Ok(()) => {
+							log_info!(
+								self.logger,
+								"[LSPS4] execute_htlc_actions: removed HTLC {:?} from store after forward",
+								forward_action.htlc.id()
+							);
+						},
+						Err(e) => {
+							log_info!(
+								self.logger,
+								"[LSPS4] execute_htlc_actions: HTLC {:?} was NOT in store (expected if from htlc_intercepted connected path): {}",
+								forward_action.htlc.id(),
+								e
+							);
+						},
+					}
 				},
 				Err(ref e) => {
 					log_error!(
 						self.logger,
-						"[LSPS4] execute_htlc_actions: forward_intercepted_htlc FAILED for HTLC {:?} - error: {:?} (took {}ms)",
+						"[LSPS4] execute_htlc_actions: forward FAILED for HTLC {:?} - error: {:?} (took {}ms). Kept in store for retry.",
 						forward_action.htlc.id(),
 						e,
 						fwd_start.elapsed().as_millis()
 					);
-				},
-			}
 
-			// Remove from store - log whether it was actually present
-			match self.htlc_store.remove(&forward_action.htlc.id()) {
-				Ok(()) => {
-					log_info!(
-						self.logger,
-						"[LSPS4] execute_htlc_actions: removed HTLC {:?} from store after forward",
-						forward_action.htlc.id()
-					);
-				},
-				Err(e) => {
-					log_info!(
-						self.logger,
-						"[LSPS4] execute_htlc_actions: HTLC {:?} was NOT in store (expected if from htlc_intercepted connected path): {}",
-						forward_action.htlc.id(),
-						e
-					);
+					// On error, ensure HTLC stays in store for retry.
+					// insert() is a no-op if already present.
+					if let Err(e) = self.htlc_store.insert(forward_action.htlc.clone()) {
+						log_error!(
+							self.logger,
+							"[LSPS4] execute_htlc_actions: failed to re-insert HTLC {:?} into store: {}",
+							forward_action.htlc.id(),
+							e
+						);
+					}
 				},
 			}
 		}

@@ -6746,10 +6746,11 @@ where
 							});
 						}
 						if !is_live {
-							log_info!(entry_logger,
-								"forward_intercepted_htlc: WARNING - channel {} is_usable but NOT is_live (peer_disconnected flag set). HTLC will be queued but will fail at send_htlc time.",
-								next_hop_channel_id
-							);
+							return Err(APIError::ChannelUnavailable {
+								err: format!(
+									"Channel with id {next_hop_channel_id} is not live (peer_disconnected flag set)"
+								),
+							});
 						}
 						funded_chan.context.outbound_scid_alias()
 					} else {

@@ -192,6 +192,16 @@ where L::Target: Logger, KV::Target: KVStoreSync {
 		htlcs
 	}
 
+	/// Get all unique peer node IDs that have stored HTLCs.
+	pub fn get_all_peer_node_ids(&self) -> Vec<PublicKey> {
+		let locked = self.htlcs.lock().unwrap();
+		let mut seen = std::collections::HashSet::new();
+		for htlc in locked.values() {
+			seen.insert(htlc.next_node_id());
+		}
+		seen.into_iter().collect()
+	}
+
 	/// Get all intercepted HTLCs that are older than the specified threshold in seconds.
 	pub fn get_expired_htlcs(&self, now: u64, threshold_seconds: u64) -> Vec<InterceptedHtlc> {
 		self.list_filter(|htlc| {
