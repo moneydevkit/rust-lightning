@@ -46,13 +46,10 @@ use crate::lsps4::msgs::{
 };
 
 use std::string::String;
+use std::time::Instant;
 use std::vec::Vec;
 
 const HTLC_EXPIRY_THRESHOLD_SECS: u64 = 10;
-
-use crate::utils::async_poll::dummy_waker;
-use core::task;
-use std::future::Future;
 
 /// Action to forward a specific HTLC through a channel
 #[derive(Debug)]
@@ -170,11 +167,16 @@ where
 				counterparty_node_id.clone(),
 			);
 
-			if !self.is_peer_connected(&counterparty_node_id) {
-				log_debug!(
+			let is_connected = self.is_peer_connected(&counterparty_node_id);
+			let connected_count = self.connected_peers.read().unwrap().len();
+
+			if !is_connected {
+				log_info!(
 					self.logger,
-					"[htlc_intercepted] Peer {} not connected, storing HTLC and sending webhook",
-					counterparty_node_id
+					"[LSPS4] htlc_intercepted: peer {} NOT in connected_peers (set size: {}), storing HTLC and sending webhook. payment_hash: {}",
+					counterparty_node_id,
+					connected_count,
+					payment_hash
 				);
 				self.htlc_store.insert(htlc).unwrap(); // TODO: handle persistence failures
 				// Re-check: the peer may have reconnected while we were persisting.
@@ -183,7 +185,7 @@ where
 				if self.is_peer_connected(&counterparty_node_id) {
 					log_info!(
 						self.logger,
-						"[htlc_intercepted] Peer {} reconnected during HTLC store, processing immediately",
+						"[LSPS4] htlc_intercepted: peer {} reconnected during HTLC store, processing immediately",
 						counterparty_node_id
 					);
 					let htlcs = self.htlc_store.get_htlcs_by_node_id(&counterparty_node_id);
@@ -196,11 +198,32 @@ where
 					}));
 				}
 			} else {
-				log_debug!(
+				// Log channel states when taking the "connected" path
+				let channels = self
+					.channel_manager
+					.get_cm()
+					.list_channels_with_counterparty(&counterparty_node_id);
+				let any_usable = channels.iter().any(|ch| ch.is_usable);
+				log_info!(
 					self.logger,
-					"[htlc_intercepted] Peer {} connected, processing HTLC immediately",
-					counterparty_node_id
+					"[LSPS4] htlc_intercepted: peer {} IS in connected_peers (set size: {}), processing immediately. channels: {}, any_usable: {}, payment_hash: {}",
+					counterparty_node_id,
+					connected_count,
+					channels.len(),
+					any_usable,
+					payment_hash
 				);
+				for ch in &channels {
+					log_info!(
+						self.logger,
+						"[LSPS4] htlc_intercepted: channel {} - is_usable: {}, is_channel_ready: {}, outbound_capacity: {}msat",
+						ch.channel_id,
+						ch.is_usable,
+						ch.is_channel_ready,
+						ch.outbound_capacity_msat
+					);
+				}
+
 				let actions =
 					self.calculate_htlc_actions_for_peer(counterparty_node_id, vec![htlc.clone()]);
 
@@ -210,7 +233,7 @@ where
 
 				log_debug!(
 					self.logger,
-					"[htlc_intercepted] Calculated actions for peer {}: {:?}",
+					"[LSPS4] htlc_intercepted: calculated actions for peer {}: {:?}",
 					counterparty_node_id,
 					actions
 				);
@@ -242,9 +265,40 @@ where
 	pub fn channel_ready(
 		&self, counterparty_node_id: &PublicKey,
 	) -> Result<(), APIError> {
+		let is_connected = self.is_peer_connected(counterparty_node_id);
 
-		if self.is_peer_connected(counterparty_node_id) {
+		log_info!(
+			self.logger,
+			"[LSPS4] channel_ready: peer {} (is_peer_connected: {})",
+			counterparty_node_id,
+			is_connected
+		);
+
+		if is_connected {
 			let htlcs = self.htlc_store.get_htlcs_by_node_id(counterparty_node_id);
+			log_info!(
+				self.logger,
+				"[LSPS4] channel_ready: peer {} has {} HTLCs in store to process",
+				counterparty_node_id,
+				htlcs.len()
+			);
+
+			// Log channel states at channel_ready time - key diagnostic for race condition
+			let channels = self
+				.channel_manager
+				.get_cm()
+				.list_channels_with_counterparty(counterparty_node_id);
+			for ch in &channels {
+				log_info!(
+					self.logger,
+					"[LSPS4] channel_ready: channel {} - is_usable: {}, is_channel_ready: {}, outbound_capacity: {}msat",
+					ch.channel_id,
+					ch.is_usable,
+					ch.is_channel_ready,
+					ch.outbound_capacity_msat
+				);
+			}
+
 			self.process_htlcs_for_peer(counterparty_node_id.clone(), htlcs);
 		}
 
@@ -253,24 +307,77 @@ where
 
 	/// Will attempt to forward any pending intercepted htlcs to this counterparty.
 	pub fn peer_connected(&self, counterparty_node_id: PublicKey) {
+		let fn_start = Instant::now();
+		let connected_count = {
+			let mut peers = self.connected_peers.write().unwrap();
+			peers.insert(counterparty_node_id);
+			peers.len()
+		};
+
 		log_info!(
 			self.logger,
-			"Peer connected: {} inserting into connected peers map",
-			counterparty_node_id
+			"[LSPS4] peer_connected: {} (total connected peers: {})",
+			counterparty_node_id,
+			connected_count
 		);
 
-		self.connected_peers.write().unwrap().insert(counterparty_node_id);
+		// Log channel states BEFORE attempting to forward - key diagnostic for race condition.
+		// If is_usable is false but is_channel_ready is true, the channel hasn't completed
+		// ChannelReestablish yet and forward_intercepted_htlc will silently fail later.
+		let channels = self
+			.channel_manager
+			.get_cm()
+			.list_channels_with_counterparty(&counterparty_node_id);
+		for ch in &channels {
+			log_info!(
+				self.logger,
+				"[LSPS4] peer_connected: channel {} with {} - is_usable: {}, is_channel_ready: {}, outbound_capacity: {}msat",
+				ch.channel_id,
+				counterparty_node_id,
+				ch.is_usable,
+				ch.is_channel_ready,
+				ch.outbound_capacity_msat
+			);
+		}
+		if channels.is_empty() {
+			log_info!(
+				self.logger,
+				"[LSPS4] peer_connected: {} has NO channels",
+				counterparty_node_id
+			);
+		}
 
 		let htlcs = self.htlc_store.get_htlcs_by_node_id(&counterparty_node_id);
+		let htlc_count = htlcs.len();
 
 		log_info!(
 			self.logger,
-			"{} has {} htlcs waiting to be forwarded",
+			"[LSPS4] peer_connected: {} has {} HTLCs waiting to be forwarded",
 			counterparty_node_id,
-			htlcs.len()
+			htlc_count
 		);
 
+		if htlc_count > 0 {
+			for htlc in &htlcs {
+				log_info!(
+					self.logger,
+					"[LSPS4] peer_connected: pending HTLC {:?} - payment_hash: {}, amount: {}msat, scid: {}",
+					htlc.id(),
+					htlc.payment_hash(),
+					htlc.expected_outbound_amount_msat(),
+					htlc.requested_next_hop_scid()
+				);
+			}
+		}
+
 		self.process_htlcs_for_peer(counterparty_node_id.clone(), htlcs);
+
+		log_info!(
+			self.logger,
+			"[LSPS4] peer_connected: TOTAL took {}ms for {}",
+			fn_start.elapsed().as_millis(),
+			counterparty_node_id
+		);
 	}
 
 	/// Handle expired HTLCs.
@@ -278,11 +385,32 @@ where
 	/// Will fail the HTLCs and remove them from the store.
 	/// Needs to be called regularly to cleanup old htlcs.
 	pub async fn handle_expired_htlcs(&self, now: u64) {
-		for htlc in self.htlc_store.get_expired_htlcs(now, HTLC_EXPIRY_THRESHOLD_SECS) {
+		let expired = self.htlc_store.get_expired_htlcs(now, HTLC_EXPIRY_THRESHOLD_SECS);
+		if !expired.is_empty() {
+			log_info!(
+				self.logger,
+				"[LSPS4] handle_expired_htlcs: found {} expired HTLCs (threshold: {}s, now: {})",
+				expired.len(),
+				HTLC_EXPIRY_THRESHOLD_SECS,
+				now
+			);
+		}
+
+		for htlc in expired {
+			log_info!(
+				self.logger,
+				"[LSPS4] handle_expired_htlcs: failing HTLC {:?} - payment_hash: {}, amount: {}msat, peer: {}",
+				htlc.id(),
+				htlc.payment_hash(),
+				htlc.expected_outbound_amount_msat(),
+				htlc.next_node_id()
+			);
+
 			if let Err(e) = self.channel_manager.get_cm().fail_intercepted_htlc(htlc.id()) {
 				log_error!(
 					self.logger,
-					"HTLC was already failed when we tried to fail it: {:?}",
+					"[LSPS4] handle_expired_htlcs: HTLC {:?} was already failed: {:?}",
+					htlc.id(),
 					e
 				);
 			}
@@ -290,7 +418,8 @@ where
 			if let Err(e) = self.htlc_store.remove(&htlc.id()) {
 				log_error!(
 					self.logger,
-					"Failed to remove expired intercepted HTLC from store: {}",
+					"[LSPS4] handle_expired_htlcs: failed to remove HTLC {:?} from store: {}",
+					htlc.id(),
 					e
 				);
 			}
@@ -303,7 +432,34 @@ where
 
 	/// Will update the set of connected peers
 	pub fn peer_disconnected(&self, counterparty_node_id: &PublicKey) {
-		self.connected_peers.write().unwrap().remove(counterparty_node_id);
+		let (was_present, remaining_count) = {
+			let mut peers = self.connected_peers.write().unwrap();
+			let was = peers.remove(counterparty_node_id);
+			(was, peers.len())
+		};
+
+		let pending_htlcs = self.htlc_store.get_htlcs_by_node_id(counterparty_node_id);
+
+		log_info!(
+			self.logger,
+			"[LSPS4] peer_disconnected: {} (was_in_set: {}, remaining connected: {}, pending_htlcs_in_store: {})",
+			counterparty_node_id,
+			was_present,
+			remaining_count,
+			pending_htlcs.len()
+		);
+
+		if !pending_htlcs.is_empty() {
+			for htlc in &pending_htlcs {
+				log_info!(
+					self.logger,
+					"[LSPS4] peer_disconnected: ORPHANED HTLC {:?} left in store - payment_hash: {}, amount: {}msat",
+					htlc.id(),
+					htlc.payment_hash(),
+					htlc.expected_outbound_amount_msat()
+				);
+			}
+		}
 	}
 
 	fn handle_register_node_request(
@@ -393,9 +549,23 @@ where
 		let mut channel_capacity_map: HashMap<ChannelId, u64> = new_hash_map();
 		for channel in &channels {
 			channel_capacity_map.insert(channel.channel_id, channel.outbound_capacity_msat);
+			log_info!(
+				self.logger,
+				"[LSPS4] calculate_htlc_actions: channel {} - is_usable: {}, is_channel_ready: {}, outbound_capacity: {}msat",
+				channel.channel_id,
+				channel.is_usable,
+				channel.is_channel_ready,
+				channel.outbound_capacity_msat
+			);
 		}
 
-		log_info!(self.logger, "{} has {} channels with these outbound capacities: {:?}", their_node_id, channels.len(), channel_capacity_map);
+		log_info!(
+			self.logger,
+			"[LSPS4] calculate_htlc_actions: {} has {} channels, {} HTLCs to process",
+			their_node_id,
+			channels.len(),
+			htlcs.len()
+		);
 
 		struct ComputedHtlc {
 			htlc: InterceptedHtlc,
@@ -490,27 +660,84 @@ where
 	) {
 		// Execute forwards
 		for forward_action in actions.forwards {
-			log_debug!(
+			// Log channel state RIGHT BEFORE forwarding - key diagnostic
+			let channels = self
+				.channel_manager
+				.get_cm()
+				.list_channels_with_counterparty(&their_node_id);
+			let target_channel =
+				channels.iter().find(|ch| ch.channel_id == forward_action.channel_id);
+			if let Some(ch) = target_channel {
+				log_info!(
+					self.logger,
+					"[LSPS4] execute_htlc_actions: PRE-FORWARD channel {} - is_usable: {}, is_channel_ready: {}, outbound_capacity: {}msat",
+					ch.channel_id,
+					ch.is_usable,
+					ch.is_channel_ready,
+					ch.outbound_capacity_msat
+				);
+			} else {
+				log_error!(
+					self.logger,
+					"[LSPS4] execute_htlc_actions: TARGET CHANNEL {} NOT FOUND for peer {} before forward!",
+					forward_action.channel_id,
+					their_node_id
+				);
+			}
+
+			log_info!(
 				self.logger,
-				"Executing forward for HTLC {:?} through channel {} with amount {}msat (skimmed {}msat)",
+				"[LSPS4] execute_htlc_actions: forwarding HTLC {:?} through channel {} to peer {}, amount: {}msat, payment_hash: {}",
 				forward_action.htlc.id(),
 				forward_action.channel_id,
+				their_node_id,
 				forward_action.amount_to_forward_msat,
-				forward_action.skimmed_fee_msat
+				forward_action.htlc.payment_hash()
 			);
 
-			if let Err(e) = self.channel_manager.get_cm().forward_intercepted_htlc(
+			let fwd_start = Instant::now();
+			match self.channel_manager.get_cm().forward_intercepted_htlc(
 				forward_action.htlc.id(),
 				&forward_action.channel_id,
 				forward_action.htlc.next_node_id(),
 				forward_action.amount_to_forward_msat,
 			) {
-				log_error!(self.logger, "Failed to forward intercepted HTLC: {:?}", e);
+				Ok(()) => {
+					log_info!(
+						self.logger,
+						"[LSPS4] execute_htlc_actions: forward_intercepted_htlc returned Ok for HTLC {:?} (took {}ms). NOTE: Ok does NOT guarantee delivery - channel may still be reestablishing.",
+						forward_action.htlc.id(),
+						fwd_start.elapsed().as_millis()
+					);
+				},
+				Err(ref e) => {
+					log_error!(
+						self.logger,
+						"[LSPS4] execute_htlc_actions: forward_intercepted_htlc FAILED for HTLC {:?} - error: {:?} (took {}ms)",
+						forward_action.htlc.id(),
+						e,
+						fwd_start.elapsed().as_millis()
+					);
+				},
 			}
 
-			// Remove the HTLC from store after forwarding
-			if let Err(e) = self.htlc_store.remove(&forward_action.htlc.id()) {
-				log_error!(self.logger, "Failed to remove intercepted HTLC from store: {}", e);
+			// Remove from store - log whether it was actually present
+			match self.htlc_store.remove(&forward_action.htlc.id()) {
+				Ok(()) => {
+					log_info!(
+						self.logger,
+						"[LSPS4] execute_htlc_actions: removed HTLC {:?} from store after forward",
+						forward_action.htlc.id()
+					);
+				},
+				Err(e) => {
+					log_info!(
+						self.logger,
+						"[LSPS4] execute_htlc_actions: HTLC {:?} was NOT in store (expected if from htlc_intercepted connected path): {}",
+						forward_action.htlc.id(),
+						e
+					);
+				},
 			}
 		}
 

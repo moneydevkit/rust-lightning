@@ -9860,6 +9860,7 @@ where
 
 		// Go ahead and unmark PeerDisconnected as various calls we may make check for it (and all
 		// remaining cases either succeed or ErrorMessage-fail).
+		log_info!(logger, "channel_reestablish: clearing peer_disconnected flag for channel {} - channel will now be is_live()", self.context.channel_id());
 		self.context.channel_state.clear_peer_disconnected();
 		self.mark_response_received();
 
@@ -12614,6 +12615,10 @@ where
 			// disconnected during the time the previous hop was doing the commitment dance we may
 			// end up getting here after the forwarding delay. In any case, returning an
 			// IgnoreError will get ChannelManager to do the right thing and fail backwards now.
+			log_info!(logger,
+				"send_htlc: REJECTING HTLC on channel {} - peer_disconnected flag is set. payment_hash: {}, amount: {}msat. Channel was is_usable() at forward_intercepted_htlc time but is NOT is_live() now.",
+				self.context.channel_id(), payment_hash, amount_msat
+			);
 			return Err((
 				LocalHTLCFailureReason::PeerOffline,
 				"Cannot send an HTLC while disconnected from channel counterparty".to_owned(),
