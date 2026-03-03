@@ -49,7 +49,7 @@ use std::string::String;
 use std::time::Instant;
 use std::vec::Vec;
 
-const HTLC_EXPIRY_THRESHOLD_SECS: u64 = 10;
+const HTLC_EXPIRY_THRESHOLD_SECS: u64 = 45;
 
 /// Action to forward a specific HTLC through a channel
 #[derive(Debug)]
