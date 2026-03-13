@@ -523,7 +523,20 @@ where
 					htlcs.len(),
 					node_id
 				);
-				self.process_htlcs_for_peer(node_id, htlcs);
+				let actions = self.calculate_htlc_actions_for_peer(node_id, htlcs);
+				if actions.new_channel_needed_msat.is_some() {
+					// A channel open is already in flight from htlc_intercepted or
+					// peer_connected. Skip — channel_ready will handle forwarding
+					// once the new channel is established.
+					log_info!(
+						self.logger,
+						"[LSPS4] process_pending_htlcs: peer {} needs a new channel, \
+						 skipping (channel open already in flight)",
+						node_id
+					);
+					continue;
+				}
+				self.execute_htlc_actions(actions, node_id);
 			}
 		}
 	}
@@ -614,6 +627,9 @@ where
 
 		let mut channel_capacity_map: HashMap<ChannelId, u64> = new_hash_map();
 		for channel in &channels {
+			if !channel.is_usable {
+				continue;
+			}
 			channel_capacity_map.insert(channel.channel_id, channel.outbound_capacity_msat);
 			log_info!(
 				self.logger,
@@ -726,29 +742,17 @@ where
 	) {
 		// Execute forwards
 		for forward_action in actions.forwards {
-			// Log channel state RIGHT BEFORE forwarding - key diagnostic
-			let channels = self
-				.channel_manager
-				.get_cm()
-				.list_channels_with_counterparty(&their_node_id);
-			let target_channel =
-				channels.iter().find(|ch| ch.channel_id == forward_action.channel_id);
-			if let Some(ch) = target_channel {
+			// Re-check peer liveness right before forwarding to narrow the
+			// TOCTOU window between the usability check and the actual forward.
+			if !self.is_peer_connected(&their_node_id) {
 				log_info!(
 					self.logger,
-					"[LSPS4] execute_htlc_actions: PRE-FORWARD channel {} - is_usable: {}, is_channel_ready: {}, outbound_capacity: {}msat",
-					ch.channel_id,
-					ch.is_usable,
-					ch.is_channel_ready,
-					ch.outbound_capacity_msat
+					"[LSPS4] execute_htlc_actions: peer {} disconnected before forward, 					 skipping HTLC {:?} (will retry on next timer tick). payment_hash: {}",
+					their_node_id,
+					forward_action.htlc.id(),
+					forward_action.htlc.payment_hash()
 				);
-			} else {
-				log_error!(
-					self.logger,
-					"[LSPS4] execute_htlc_actions: TARGET CHANNEL {} NOT FOUND for peer {} before forward!",
-					forward_action.channel_id,
-					their_node_id
-				);
+				continue;
 			}
 
 			log_info!(
@@ -771,39 +775,46 @@ where
 				Ok(()) => {
 					log_info!(
 						self.logger,
-						"[LSPS4] execute_htlc_actions: forward_intercepted_htlc returned Ok for HTLC {:?} (took {}ms). NOTE: Ok does NOT guarantee delivery - channel may still be reestablishing.",
+						"[LSPS4] execute_htlc_actions: forward_intercepted_htlc returned Ok for HTLC {:?} \
+						 (took {}ms). payment_hash: {}. NOTE: Ok does NOT guarantee delivery - channel may still be reestablishing.",
 						forward_action.htlc.id(),
-						fwd_start.elapsed().as_millis()
+						fwd_start.elapsed().as_millis(),
+						forward_action.htlc.payment_hash()
 					);
 				},
 				Err(ref e) => {
-					log_error!(
+					log_info!(
 						self.logger,
-						"[LSPS4] execute_htlc_actions: forward_intercepted_htlc FAILED for HTLC {:?} - error: {:?} (took {}ms)",
+						"[LSPS4] execute_htlc_actions: forward returned Err for HTLC {:?}: {:?} \
+						 (took {}ms). payment_hash: {}",
 						forward_action.htlc.id(),
 						e,
-						fwd_start.elapsed().as_millis()
+						fwd_start.elapsed().as_millis(),
+						forward_action.htlc.payment_hash()
 					);
 				},
 			}
 
-			// Remove from store - log whether it was actually present
+			// Always remove from store after forward attempt. On Ok the InterceptId is
+			// consumed and the HTLC is in-flight — we cannot defer removal because the
+			// in-flight HTLC reduces outbound capacity, causing the next timer tick to
+			// see insufficient capacity and emit a spurious OpenChannel. If send_htlc
+			// later fails internally, LDK re-emits HTLCIntercepted with a fresh
+			// InterceptId. On Err the InterceptId was already consumed or stale.
 			match self.htlc_store.remove(&forward_action.htlc.id()) {
-				Ok(()) => {
-					log_info!(
-						self.logger,
-						"[LSPS4] execute_htlc_actions: removed HTLC {:?} from store after forward",
-						forward_action.htlc.id()
-					);
-				},
-				Err(e) => {
-					log_info!(
-						self.logger,
-						"[LSPS4] execute_htlc_actions: HTLC {:?} was NOT in store (expected if from htlc_intercepted connected path): {}",
-						forward_action.htlc.id(),
-						e
-					);
-				},
+				Ok(()) => log_info!(
+					self.logger,
+					"[LSPS4] execute_htlc_actions: removed HTLC {:?} from store. payment_hash: {}",
+					forward_action.htlc.id(),
+					forward_action.htlc.payment_hash()
+				),
+				Err(e) => log_info!(
+					self.logger,
+					"[LSPS4] execute_htlc_actions: HTLC {:?} not in store: {}. payment_hash: {}",
+					forward_action.htlc.id(),
+					e,
+					forward_action.htlc.payment_hash()
+				),
 			}
 		}
 
