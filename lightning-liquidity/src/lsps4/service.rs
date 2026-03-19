@@ -9,7 +9,7 @@
 
 //! Contains the main LSPS4 server-side object, [`LSPS4ServiceHandler`].
 
-use crate::events::{LiquidityEvent, EventQueue};
+use crate::events::{EventQueue, LiquidityEvent};
 use crate::lsps0::ser::{
 	LSPSMessage, LSPSProtocolMessageHandler, LSPSRequestId, LSPSResponseError,
 	JSONRPC_INTERNAL_ERROR_ERROR_CODE, JSONRPC_INTERNAL_ERROR_ERROR_MESSAGE,
@@ -183,7 +183,7 @@ where
 				// peer_connected() will find this HTLC in the store and process it.
 				// The process_pending_htlcs timer also serves as a fallback.
 				let mut event_queue_notifier = self.pending_events.notifier();
-				event_queue_notifier.enqueue(crate::events::LiquidityEvent::LSPS4Service(LSPS4ServiceEvent::SendWebhook {
+				event_queue_notifier.enqueue(LiquidityEvent::LSPS4Service(LSPS4ServiceEvent::SendWebhook {
 					counterparty_node_id: counterparty_node_id.clone(),
 					payment_hash,
 				}));
@@ -497,6 +497,29 @@ where
 					htlc.expected_outbound_amount_msat()
 				);
 			}
+
+			// Re-send webhook so the peer wakes up and reconnects. Use the first
+			// HTLC's payment_hash — the peer will reconnect and peer_connected /
+			// process_pending_htlcs will forward all queued HTLCs. If the peer
+			// disconnects again before channels become usable, this fires again,
+			// creating a retry loop bounded by the HTLC expiry threshold (45s).
+			let payment_hash = pending_htlcs[0].payment_hash();
+			log_info!(
+				self.logger,
+				"[LSPS4] peer_disconnected: re-sending webhook for {} orphaned HTLCs, peer: {}, payment_hash: {}",
+				pending_htlcs.len(),
+				counterparty_node_id,
+				payment_hash
+			);
+			let mut event_queue_notifier = self.pending_events.notifier();
+			event_queue_notifier.enqueue(
+				LiquidityEvent::LSPS4Service(
+					LSPS4ServiceEvent::SendWebhook {
+						counterparty_node_id: counterparty_node_id.clone(),
+						payment_hash,
+					},
+				),
+			);
 		}
 	}
 
@@ -828,7 +851,7 @@ where
 			);
 
 			let mut event_queue_notifier = self.pending_events.notifier();
-			event_queue_notifier.enqueue(crate::events::LiquidityEvent::LSPS4Service(LSPS4ServiceEvent::OpenChannel {
+			event_queue_notifier.enqueue(LiquidityEvent::LSPS4Service(LSPS4ServiceEvent::OpenChannel {
 				their_network_key: their_node_id,
 				amt_to_forward_msat: channel_size_msat,
 				channel_count: actions.channel_count,
