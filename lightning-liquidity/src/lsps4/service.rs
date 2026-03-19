@@ -101,6 +101,9 @@ where
 	scid_store: ScidStore<L, K>,
 	htlc_store: HTLCStore<L, K>,
 	connected_peers: RwLock<HashSet<PublicKey>>,
+	/// Peers for which an OpenChannel event has been emitted but channel_ready has not
+	/// yet fired. Used to prevent duplicate OpenChannel emissions from the timer.
+	pending_channel_opens: RwLock<HashSet<PublicKey>>,
 	config: LSPS4ServiceConfig,
 }
 
@@ -128,6 +131,7 @@ where
 			config,
 			logger,
 			connected_peers: RwLock::new(HashSet::new()),
+			pending_channel_opens: RwLock::new(HashSet::new()),
 		})
 	}
 
@@ -275,6 +279,8 @@ where
 	pub fn channel_ready(
 		&self, counterparty_node_id: &PublicKey,
 	) -> Result<(), APIError> {
+		self.pending_channel_opens.write().unwrap().remove(counterparty_node_id);
+
 		let is_connected = self.is_peer_connected(counterparty_node_id);
 
 		log_info!(
@@ -547,14 +553,16 @@ where
 					node_id
 				);
 				let actions = self.calculate_htlc_actions_for_peer(node_id, htlcs);
-				if actions.new_channel_needed_msat.is_some() {
-					// A channel open is already in flight from htlc_intercepted or
-					// peer_connected. Skip — channel_ready will handle forwarding
-					// once the new channel is established.
+				if actions.new_channel_needed_msat.is_some()
+					&& self.pending_channel_opens.read().unwrap().contains(&node_id)
+				{
+					// A channel open was already emitted (by htlc_intercepted or
+					// peer_connected) and channel_ready hasn't fired yet. Skip to
+					// avoid opening a duplicate channel.
 					log_info!(
 						self.logger,
-						"[LSPS4] process_pending_htlcs: peer {} needs a new channel, \
-						 skipping (channel open already in flight)",
+						"[LSPS4] process_pending_htlcs: peer {} needs a new channel \
+						 but one is already being opened, skipping",
 						node_id
 					);
 					continue;
@@ -850,6 +858,7 @@ where
 				channel_size_msat
 			);
 
+			self.pending_channel_opens.write().unwrap().insert(their_node_id);
 			let mut event_queue_notifier = self.pending_events.notifier();
 			event_queue_notifier.enqueue(LiquidityEvent::LSPS4Service(LSPS4ServiceEvent::OpenChannel {
 				their_network_key: their_node_id,
