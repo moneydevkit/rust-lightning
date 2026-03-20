@@ -236,21 +236,36 @@ where
 						vec![htlc.clone()],
 					);
 
-					// Store the HTLC if it wasn't forwarded. This covers both
-				// the new-channel-needed case and the deferred case (channels
-				// exist but are temporarily non-usable due to reestablish).
-				if actions.new_channel_needed_msat.is_some() || actions.forwards.is_empty() {
-					self.htlc_store.insert(htlc).unwrap();
-				}
-
-					log_debug!(
-						self.logger,
-						"[LSPS4] htlc_intercepted: calculated actions for peer {}: {:?}",
-						counterparty_node_id,
-						actions
-					);
-
-					self.execute_htlc_actions(actions, counterparty_node_id.clone());
+					if actions.new_channel_needed_msat.is_some() {
+						// Before opening a channel, guard against the TOCTOU race:
+						// we checked any_usable above, but the peer may have
+						// reconnected since then, flipping channels to non-usable.
+						// Re-check now. If non-usable channels exist, the capacity
+						// shortage is transient -- just store and let
+						// process_pending_htlcs forward once reestablish completes.
+						if self.has_non_usable_channel(&counterparty_node_id) {
+							log_info!(
+								self.logger,
+								"[LSPS4] htlc_intercepted: TOCTOU detected for peer {}, \
+								 channels went non-usable since initial check. Storing HTLC \
+								 and deferring. payment_hash: {}",
+								counterparty_node_id,
+								payment_hash
+							);
+							self.htlc_store.insert(htlc).unwrap();
+						} else {
+							self.htlc_store.insert(htlc).unwrap();
+							self.execute_htlc_actions(actions, counterparty_node_id.clone());
+						}
+					} else {
+						log_debug!(
+							self.logger,
+							"[LSPS4] htlc_intercepted: calculated actions for peer {}: {:?}",
+							counterparty_node_id,
+							actions
+						);
+						self.execute_htlc_actions(actions, counterparty_node_id.clone());
+					}
 				}
 			}
 		} else {
@@ -479,6 +494,16 @@ where
 			.any(|c| c.is_usable)
 	}
 
+	/// Returns true if the peer has at least one channel that is not currently usable
+	/// (e.g. reestablish in progress after reconnect).
+	fn has_non_usable_channel(&self, counterparty_node_id: &PublicKey) -> bool {
+		self.channel_manager
+			.get_cm()
+			.list_channels_with_counterparty(counterparty_node_id)
+			.iter()
+			.any(|c| !c.is_usable)
+	}
+
 	/// Will update the set of connected peers
 	pub fn peer_disconnected(&self, counterparty_node_id: &PublicKey) {
 		let (was_present, remaining_count) = {
@@ -628,18 +653,13 @@ where
 	}
 
 	/// Calculate what actions to take for a list of HTLCs for a specific peer.
-	///
-	/// Only usable channels are considered for forwarding. If no usable channel has
-	/// sufficient capacity, a new channel is requested — unless non-usable channels
-	/// exist (e.g. reestablish in progress), in which case we return no action and
-	/// let the caller defer until the channels become usable again.
+	/// Only usable channels are considered for forwarding.
 	pub(crate) fn calculate_htlc_actions_for_peer(
 		&self, their_node_id: PublicKey, mut htlcs: Vec<InterceptedHtlc>,
 	) -> HtlcProcessingActions {
 		let channels =
 			self.channel_manager.get_cm().list_channels_with_counterparty(&their_node_id);
 		let channel_count = channels.len();
-		let has_non_usable = channels.iter().any(|ch| !ch.is_usable);
 
 		let mut channel_capacity_map: HashMap<ChannelId, u64> = new_hash_map();
 		for channel in &channels {
@@ -736,22 +756,6 @@ where
 			}
 
 			if !can_forward {
-				if has_non_usable {
-					// Channels exist but aren't usable (reestablish in progress).
-					// Don't open a new channel — defer until they become usable.
-					log_info!(
-						self.logger,
-						"[LSPS4] calculate_htlc_actions: {} has non-usable channels, \
-						 deferring instead of opening new channel",
-						their_node_id
-					);
-					return HtlcProcessingActions {
-						forwards,
-						new_channel_needed_msat: None,
-						channel_count,
-					};
-				}
-
 				// No existing channel has sufficient capacity, need to open a new channel.
 				// Calculate total amount needed for remaining HTLCs (including current one).
 				let total_remaining_amount = computed_htlcs
