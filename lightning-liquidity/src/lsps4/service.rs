@@ -236,9 +236,12 @@ where
 						vec![htlc.clone()],
 					);
 
-					if actions.new_channel_needed_msat.is_some() {
-						self.htlc_store.insert(htlc).unwrap();
-					}
+					// Store the HTLC if it wasn't forwarded. This covers both
+				// the new-channel-needed case and the deferred case (channels
+				// exist but are temporarily non-usable due to reestablish).
+				if actions.new_channel_needed_msat.is_some() || actions.forwards.is_empty() {
+					self.htlc_store.insert(htlc).unwrap();
+				}
 
 					log_debug!(
 						self.logger,
