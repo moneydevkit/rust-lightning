@@ -409,21 +409,17 @@ where
 			self.process_htlcs_for_peer(counterparty_node_id.clone(), htlcs);
 		} else {
 			// Channels exist but none usable yet (reestablish in progress).
-			// We still call process_htlcs_for_peer because calculate_htlc_actions
-			// skips non-usable channels. If existing capacity is insufficient, this
-			// will emit OpenChannel now rather than deferring to process_pending_htlcs
-			// (which would never open a channel). Forwards through existing channels
-			// will be empty since none are usable, so no premature forwarding occurs.
-			// The actual forwards happen later via channel_ready or process_pending_htlcs
-			// once reestablish completes.
+			// Defer until process_pending_htlcs picks them up once reestablish
+			// completes and channels become usable again. We must NOT call
+			// process_htlcs_for_peer here: calculate would see 0 usable capacity
+			// and emit a spurious OpenChannel for a channel that already exists.
 			log_info!(
 				self.logger,
 				"[LSPS4] peer_connected: {} has {} pending HTLCs, channels not yet usable \
-				 (reestablish in progress) - checking if new channel needed",
+				 (reestablish in progress) - deferring to process_pending_htlcs",
 				counterparty_node_id,
 				htlcs.len()
 			);
-			self.process_htlcs_for_peer(counterparty_node_id.clone(), htlcs);
 		}
 
 		log_info!(
@@ -560,14 +556,16 @@ where
 					node_id
 				);
 				let actions = self.calculate_htlc_actions_for_peer(node_id, htlcs);
-				if actions.new_channel_needed_msat.is_some() {
-					// A channel open is already in flight from htlc_intercepted or
-					// peer_connected. Skip — channel_ready will handle forwarding
-					// once the new channel is established.
+				if actions.new_channel_needed_msat.is_some()
+					&& self.has_non_usable_channel(&node_id)
+				{
+					// A non-usable channel exists — either a new channel is being
+					// opened or reestablish is still in progress. Wait for
+					// channel_ready before trying again.
 					log_info!(
 						self.logger,
-						"[LSPS4] process_pending_htlcs: peer {} needs a new channel, \
-						 skipping (channel open already in flight)",
+						"[LSPS4] process_pending_htlcs: peer {} needs a new channel \
+						 but has non-usable channels — skipping (open likely in flight)",
 						node_id
 					);
 					continue;
