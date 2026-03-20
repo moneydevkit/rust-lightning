@@ -101,6 +101,7 @@ where
 	scid_store: ScidStore<L, K>,
 	htlc_store: HTLCStore<L, K>,
 	connected_peers: RwLock<HashSet<PublicKey>>,
+	pending_channel_opens: Mutex<HashSet<PublicKey>>,
 	config: LSPS4ServiceConfig,
 }
 
@@ -128,6 +129,7 @@ where
 			config,
 			logger,
 			connected_peers: RwLock::new(HashSet::new()),
+			pending_channel_opens: Mutex::new(HashSet::new()),
 		})
 	}
 
@@ -293,6 +295,7 @@ where
 	pub fn channel_ready(
 		&self, counterparty_node_id: &PublicKey,
 	) -> Result<(), APIError> {
+		self.pending_channel_opens.lock().unwrap().remove(counterparty_node_id);
 		let is_connected = self.is_peer_connected(counterparty_node_id);
 
 		log_info!(
@@ -502,6 +505,7 @@ where
 
 	/// Will update the set of connected peers
 	pub fn peer_disconnected(&self, counterparty_node_id: &PublicKey) {
+		self.pending_channel_opens.lock().unwrap().remove(counterparty_node_id);
 		let (was_present, remaining_count) = {
 			let mut peers = self.connected_peers.write().unwrap();
 			let was = peers.remove(counterparty_node_id);
@@ -555,21 +559,16 @@ where
 					htlcs.len(),
 					node_id
 				);
-				let actions = self.calculate_htlc_actions_for_peer(node_id, htlcs);
-				if actions.new_channel_needed_msat.is_some()
-					&& self.has_non_usable_channel(&node_id)
-				{
-					// A non-usable channel exists — either a new channel is being
-					// opened or reestablish is still in progress. Wait for
-					// channel_ready before trying again.
+				if self.pending_channel_opens.lock().unwrap().contains(&node_id) {
 					log_info!(
 						self.logger,
-						"[LSPS4] process_pending_htlcs: peer {} needs a new channel \
-						 but has non-usable channels — skipping (open likely in flight)",
+						"[LSPS4] process_pending_htlcs: peer {} has a channel open \
+						 in flight — skipping",
 						node_id
 					);
 					continue;
 				}
+				let actions = self.calculate_htlc_actions_for_peer(node_id, htlcs);
 				self.execute_htlc_actions(actions, node_id);
 			}
 		}
@@ -862,6 +861,7 @@ where
 				channel_size_msat
 			);
 
+			self.pending_channel_opens.lock().unwrap().insert(their_node_id);
 			let mut event_queue_notifier = self.pending_events.notifier();
 			event_queue_notifier.enqueue(crate::events::LiquidityEvent::LSPS4Service(LSPS4ServiceEvent::OpenChannel {
 				their_network_key: their_node_id,
