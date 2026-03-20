@@ -390,14 +390,22 @@ where
 			// at all (process_htlcs_for_peer will trigger OpenChannel for JIT).
 			self.process_htlcs_for_peer(counterparty_node_id.clone(), htlcs);
 		} else {
-			// Channels exist but none usable: reestablish still in progress.
-			// Defer until process_pending_htlcs picks them up on the timer.
+			// Channels exist but none usable yet (reestablish in progress).
+			// We still call process_htlcs_for_peer because calculate_htlc_actions
+			// skips non-usable channels. If existing capacity is insufficient, this
+			// will emit OpenChannel now rather than deferring to process_pending_htlcs
+			// (which would never open a channel). Forwards through existing channels
+			// will be empty since none are usable, so no premature forwarding occurs.
+			// The actual forwards happen later via channel_ready or process_pending_htlcs
+			// once reestablish completes.
 			log_info!(
 				self.logger,
-				"[LSPS4] peer_connected: {counterparty_node_id} has {} pending HTLCs but channels \
-				 not yet usable (reestablish in progress), deferring",
+				"[LSPS4] peer_connected: {} has {} pending HTLCs, channels not yet usable \
+				 (reestablish in progress) - checking if new channel needed",
+				counterparty_node_id,
 				htlcs.len()
 			);
+			self.process_htlcs_for_peer(counterparty_node_id.clone(), htlcs);
 		}
 
 		log_info!(
