@@ -624,14 +624,19 @@ where
 		Ok(())
 	}
 
-	/// Calculate what actions to take for a list of HTLCs for a specific peer
-	/// This is a pure function that doesn't perform any side effects
+	/// Calculate what actions to take for a list of HTLCs for a specific peer.
+	///
+	/// Only usable channels are considered for forwarding. If no usable channel has
+	/// sufficient capacity, a new channel is requested — unless non-usable channels
+	/// exist (e.g. reestablish in progress), in which case we return no action and
+	/// let the caller defer until the channels become usable again.
 	pub(crate) fn calculate_htlc_actions_for_peer(
 		&self, their_node_id: PublicKey, mut htlcs: Vec<InterceptedHtlc>,
 	) -> HtlcProcessingActions {
 		let channels =
 			self.channel_manager.get_cm().list_channels_with_counterparty(&their_node_id);
 		let channel_count = channels.len();
+		let has_non_usable = channels.iter().any(|ch| !ch.is_usable);
 
 		let mut channel_capacity_map: HashMap<ChannelId, u64> = new_hash_map();
 		for channel in &channels {
@@ -651,9 +656,10 @@ where
 
 		log_info!(
 			self.logger,
-			"[LSPS4] calculate_htlc_actions: {} has {} channels, {} HTLCs to process",
+			"[LSPS4] calculate_htlc_actions: {} has {} channels ({} usable), {} HTLCs to process",
 			their_node_id,
 			channels.len(),
+			channel_capacity_map.len(),
 			htlcs.len()
 		);
 
@@ -727,8 +733,24 @@ where
 			}
 
 			if !can_forward {
-				// No existing channel has sufficient capacity, need to open a new channel
-				// Calculate total amount needed for remaining HTLCs (including current one)
+				if has_non_usable {
+					// Channels exist but aren't usable (reestablish in progress).
+					// Don't open a new channel — defer until they become usable.
+					log_info!(
+						self.logger,
+						"[LSPS4] calculate_htlc_actions: {} has non-usable channels, \
+						 deferring instead of opening new channel",
+						their_node_id
+					);
+					return HtlcProcessingActions {
+						forwards,
+						new_channel_needed_msat: None,
+						channel_count,
+					};
+				}
+
+				// No existing channel has sufficient capacity, need to open a new channel.
+				// Calculate total amount needed for remaining HTLCs (including current one).
 				let total_remaining_amount = computed_htlcs
 					.iter()
 					.fold(required_amount, |acc, h| acc.saturating_add(h.amount_to_forward_msat));
