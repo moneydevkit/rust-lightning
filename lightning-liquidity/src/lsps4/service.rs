@@ -101,6 +101,7 @@ where
 	scid_store: ScidStore<L, K>,
 	htlc_store: HTLCStore<L, K>,
 	connected_peers: RwLock<HashSet<PublicKey>>,
+	pending_channel_opens: RwLock<HashSet<PublicKey>>,
 	config: LSPS4ServiceConfig,
 }
 
@@ -128,6 +129,7 @@ where
 			config,
 			logger,
 			connected_peers: RwLock::new(HashSet::new()),
+			pending_channel_opens: RwLock::new(HashSet::new()),
 		})
 	}
 
@@ -257,6 +259,7 @@ where
 	pub fn channel_ready(
 		&self, counterparty_node_id: &PublicKey,
 	) -> Result<(), APIError> {
+		self.pending_channel_opens.write().unwrap().remove(counterparty_node_id);
 		let is_connected = self.is_peer_connected(counterparty_node_id);
 
 		log_info!(
@@ -581,8 +584,17 @@ where
 			self.channel_manager.get_cm().list_channels_with_counterparty(&their_node_id);
 		let channel_count = channels.len();
 
+		// Include channels that finished opening (is_channel_ready) in capacity
+		// decisions, even if still reestablishing (is_usable=false). This prevents
+		// spurious channel opens during reestablish. Channels still opening
+		// (is_channel_ready=false) are excluded: they report outbound_capacity_msat
+		// but reject forwards, consuming the InterceptId and losing the HTLC.
+		// execute_htlc_actions checks usability before forwarding.
 		let mut channel_capacity_map: HashMap<ChannelId, u64> = new_hash_map();
 		for channel in &channels {
+			if !channel.is_channel_ready {
+				continue;
+			}
 			channel_capacity_map.insert(channel.channel_id, channel.outbound_capacity_msat);
 			log_info!(
 				self.logger,
@@ -773,21 +785,30 @@ where
 			}
 		}
 
-		// Handle new channel opening
+		// Handle new channel opening — skip if one is already in flight.
 		if let Some(channel_size_msat) = actions.new_channel_needed_msat {
+			if self.pending_channel_opens.read().unwrap().contains(&their_node_id) {
+				log_info!(
+					self.logger,
+					"[LSPS4] execute_htlc_actions: peer {} needs a new channel but one is \
+					 already opening, skipping duplicate OpenChannel",
+					their_node_id
+				);
+			} else {
 				log_info!(
 					self.logger,
 					"Need a new channel with peer {} for {}msat to forward HTLCs",
 					their_node_id,
 					channel_size_msat
 				);
-
+				self.pending_channel_opens.write().unwrap().insert(their_node_id);
 				let mut event_queue_notifier = self.pending_events.notifier();
 				event_queue_notifier.enqueue(crate::events::LiquidityEvent::LSPS4Service(LSPS4ServiceEvent::OpenChannel {
 					their_network_key: their_node_id,
 					amt_to_forward_msat: channel_size_msat,
 					channel_count: actions.channel_count,
 				}));
+			}
 		}
 	}
 
