@@ -1034,3 +1034,88 @@ where
 		}
 	}
 }
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+
+	#[test]
+	fn test_htlc_processing_actions_is_empty() {
+		let empty = HtlcProcessingActions {
+			forwards: vec![],
+			new_channel_needed_msat: None,
+			splice_needed: None,
+			channel_count: 0,
+		};
+		assert!(empty.is_empty());
+
+		let with_channel = HtlcProcessingActions {
+			forwards: vec![],
+			new_channel_needed_msat: Some(100_000),
+			splice_needed: None,
+			channel_count: 0,
+		};
+		assert!(!with_channel.is_empty());
+
+		let with_splice = HtlcProcessingActions {
+			forwards: vec![],
+			new_channel_needed_msat: None,
+			splice_needed: Some(SpliceAction {
+				channel_id: ChannelId::from_bytes([0; 32]),
+				user_channel_id: 0,
+				amt_to_forward_msat: 50_000,
+			}),
+			channel_count: 1,
+		};
+		assert!(!with_splice.is_empty());
+	}
+
+	#[test]
+	fn test_needs_liquidity_action() {
+		let no_action = HtlcProcessingActions {
+			forwards: vec![],
+			new_channel_needed_msat: None,
+			splice_needed: None,
+			channel_count: 0,
+		};
+		assert!(!no_action.needs_liquidity_action());
+
+		let needs_channel = HtlcProcessingActions {
+			forwards: vec![],
+			new_channel_needed_msat: Some(100_000),
+			splice_needed: None,
+			channel_count: 0,
+		};
+		assert!(needs_channel.needs_liquidity_action());
+
+		let needs_splice = HtlcProcessingActions {
+			forwards: vec![],
+			new_channel_needed_msat: None,
+			splice_needed: Some(SpliceAction {
+				channel_id: ChannelId::from_bytes([0; 32]),
+				user_channel_id: 0,
+				amt_to_forward_msat: 50_000,
+			}),
+			channel_count: 1,
+		};
+		assert!(needs_splice.needs_liquidity_action());
+	}
+
+	#[test]
+	fn test_cooldown_auto_expires() {
+		// Verify the cooldown constant is less than HTLC expiry
+		assert!(LIQUIDITY_COOLDOWN_SECS < HTLC_EXPIRY_THRESHOLD_SECS);
+	}
+
+	#[test]
+	fn test_splice_action_fields() {
+		let action = SpliceAction {
+			channel_id: ChannelId::from_bytes([1; 32]),
+			user_channel_id: 42,
+			amt_to_forward_msat: 1_000_000,
+		};
+		assert_eq!(action.channel_id, ChannelId::from_bytes([1; 32]));
+		assert_eq!(action.user_channel_id, 42);
+		assert_eq!(action.amt_to_forward_msat, 1_000_000);
+	}
+}
