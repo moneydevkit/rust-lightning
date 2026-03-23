@@ -783,9 +783,12 @@ where
 					.fold(required_amount, |acc, h| acc.saturating_add(h.amount_to_forward_msat));
 
 				// Prefer splicing into the largest usable channel over opening a new one.
-				let splice_candidate = channels
+				// Use is_channel_ready (not is_usable) so we prefer splice even during
+			// channel_reestablish. splice_channel() will fail if the channel isn't
+			// usable yet, and the timer will retry once reestablishment completes.
+			let splice_candidate = channels
 					.iter()
-					.filter(|c| c.is_usable)
+					.filter(|c| c.is_channel_ready)
 					.max_by_key(|c| c.channel_value_satoshis);
 
 				if let Some(candidate) = splice_candidate {
