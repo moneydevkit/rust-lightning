@@ -442,6 +442,7 @@ where
 
 	/// Will update the set of connected peers
 	pub fn peer_disconnected(&self, counterparty_node_id: &PublicKey) {
+		self.pending_channel_opens.write().unwrap().remove(counterparty_node_id);
 		let (was_present, remaining_count) = {
 			let mut peers = self.connected_peers.write().unwrap();
 			let was = peers.remove(counterparty_node_id);
