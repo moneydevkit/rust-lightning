@@ -470,6 +470,33 @@ where
 	}
 }
 
+/// Like [`connect_outbound`], but routes the TCP connection through a SOCKS5 proxy.
+///
+/// `proxy_addr` is the address of the SOCKS5 proxy (e.g. `127.0.0.1:1080`).
+/// The proxy connects to `addr` on our behalf, then we hand the resulting stream to
+/// [`setup_outbound`].
+///
+/// Available only when the `socks` feature is enabled.
+#[cfg(feature = "socks")]
+#[cfg_attr(docsrs, doc(cfg(feature = "socks")))]
+pub async fn connect_outbound_via_socks5<PM: Deref + 'static + Send + Sync + Clone>(
+	peer_manager: PM, their_node_id: PublicKey, addr: SocketAddr, proxy_addr: SocketAddr,
+) -> Option<impl std::future::Future<Output = ()>>
+where
+	PM::Target: APeerManager<Descriptor = SocketDescriptor>,
+{
+	let connect_fut = async {
+		tokio_socks::tcp::Socks5Stream::connect(proxy_addr, addr)
+			.await
+			.map(|s| s.into_inner().into_std().unwrap())
+	};
+	if let Ok(Ok(stream)) = time::timeout(Duration::from_secs(10), connect_fut).await {
+		Some(setup_outbound(peer_manager, their_node_id, stream))
+	} else {
+		None
+	}
+}
+
 const SOCK_WAKER_VTABLE: task::RawWakerVTable = task::RawWakerVTable::new(
 	clone_socket_waker,
 	wake_socket_waker,
