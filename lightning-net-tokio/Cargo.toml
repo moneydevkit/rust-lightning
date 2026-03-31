@@ -25,7 +25,7 @@ tokio = { version = "1.35", features = [ "rt", "sync", "net", "time" ] }
 tokio-socks = { version = "0.5", optional = true }
 
 [dev-dependencies]
-tokio = { version = "1.35", features = [ "macros", "rt", "rt-multi-thread", "sync", "net", "time" ] }
+tokio = { version = "1.35", features = [ "macros", "rt", "rt-multi-thread", "sync", "net", "time", "io-util" ] }
 lightning = { version = "0.2.0", path = "../lightning", features = ["_test_utils"] }
 
 [lints]
