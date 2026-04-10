@@ -1403,14 +1403,31 @@ where
 	}
 
 	pub(super) fn needs_abandon_or_retry(&self) -> bool {
-		let outbounds = self.pending_outbound_payments.lock().unwrap();
-		outbounds.iter().any(|(_, pmt)| {
-			pmt.is_auto_retryable_now()
-				|| !pmt.is_auto_retryable_now()
-					&& pmt.remaining_parts() == 0
+		let (retryable, abandonable, total) = {
+			let outbounds = self.pending_outbound_payments.lock().unwrap();
+			let mut retryable = 0u32;
+			let mut abandonable = 0u32;
+			for (_, pmt) in outbounds.iter() {
+				if pmt.is_auto_retryable_now() {
+					retryable += 1;
+				} else if pmt.remaining_parts() == 0
 					&& !pmt.is_fulfilled()
 					&& !pmt.is_pre_htlc_lock_in()
-		})
+				{
+					abandonable += 1;
+				}
+			}
+			(retryable, abandonable, outbounds.len())
+		};
+		let result = retryable > 0 || abandonable > 0;
+		if result {
+			log_warn!(
+				self.logger,
+				"needs_abandon_or_retry: retryable={}, abandonable={}, total_pending={}",
+				retryable, abandonable, total,
+			);
+		}
+		result
 	}
 
 	#[rustfmt::skip]

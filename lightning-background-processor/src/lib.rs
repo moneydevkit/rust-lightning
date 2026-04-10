@@ -987,11 +987,21 @@ where
 	let mut last_forwards_processing_call = sleeper(batch_delay.get());
 
 	loop {
+		let loop_start = Instant::now();
+
+		let t = Instant::now();
 		channel_manager.get_cm().process_pending_events_async(async_event_handler).await;
+		let cm_events_us = t.elapsed().as_micros();
+
+		let t = Instant::now();
 		chain_monitor.process_pending_events_async(async_event_handler).await;
+		let chain_mon_events_us = t.elapsed().as_micros();
+
+		let t = Instant::now();
 		if let Some(om) = &onion_messenger {
 			om.get_om().process_pending_events_async(async_event_handler).await
 		}
+		let om_events_us = t.elapsed().as_micros();
 
 		// Note that the PeerManager::process_events may block on ChannelManager's locks,
 		// hence it comes last here. When the ChannelManager finishes whatever it's doing,
@@ -1004,7 +1014,11 @@ where
 		// ChannelManager, we want to minimize methods blocking on a ChannelManager
 		// generally, and as a fallback place such blocking only immediately before
 		// persistence.
+		let t = Instant::now();
 		peer_manager.as_ref().process_events();
+		let peer_mgr_events_us = t.elapsed().as_micros();
+
+		let t = Instant::now();
 		match check_and_reset_sleeper(&mut last_forwards_processing_call, || {
 			sleeper(batch_delay.next())
 		}) {
@@ -1014,6 +1028,7 @@ where
 			Some(true) => break,
 			None => {},
 		}
+		let htlc_fwd_us = t.elapsed().as_micros();
 
 		// We wait up to 100ms, but track how long it takes to detect being put to sleep,
 		// see `await_start`'s use below.
@@ -1047,14 +1062,20 @@ where
 			d: lm_fut,
 			e: sleeper(sleep_delay),
 		};
-		match fut.await {
-			SelectorOutput::A | SelectorOutput::B | SelectorOutput::C | SelectorOutput::D => {},
+		let t = Instant::now();
+		let selector_wake = match fut.await {
+			SelectorOutput::A => { "cm_event" },
+			SelectorOutput::B => { "chain_mon" },
+			SelectorOutput::C => { "om" },
+			SelectorOutput::D => { "lm" },
 			SelectorOutput::E(exit) => {
 				if exit {
 					break;
 				}
+				"timeout"
 			},
-		}
+		};
+		let selector_us = t.elapsed().as_micros();
 
 		let await_slow = if mobile_interruptable_platform {
 			// Specify a zero new sleeper timeout because we won't use the new sleeper. It is re-initialized in the next
@@ -1067,14 +1088,18 @@ where
 		} else {
 			false
 		};
+		let t = Instant::now();
+		let mut cm_tick_fired = false;
 		match check_and_reset_sleeper(&mut last_freshness_call, || sleeper(FRESHNESS_TIMER)) {
 			Some(false) => {
 				log_trace!(logger, "Calling ChannelManager's timer_tick_occurred");
 				channel_manager.get_cm().timer_tick_occurred();
+				cm_tick_fired = true;
 			},
 			Some(true) => break,
 			None => {},
 		}
+		let cm_tick_us = t.elapsed().as_micros();
 
 		let mut futures = Joiner::new();
 
@@ -1132,9 +1157,12 @@ where
 			GossipSync::Rapid(_) => !have_pruned || prune_timer_elapsed,
 			_ => prune_timer_elapsed,
 		};
+		let t = Instant::now();
+		let mut prune_fired = false;
 		if should_prune {
 			// The network graph must not be pruned while rapid sync completion is pending
 			if let Some(network_graph) = gossip_sync.prunable_network_graph() {
+				prune_fired = true;
 				if let Some(duration_since_epoch) = fetch_time() {
 					log_trace!(logger, "Pruning and persisting network graph.");
 					network_graph.remove_stale_channels_and_tracking_with_time(
@@ -1166,6 +1194,8 @@ where
 				have_pruned = true;
 			}
 		}
+		let prune_us = t.elapsed().as_micros();
+
 		if !have_decayed_scorer {
 			if let Some(ref scorer) = scorer {
 				if let Some(duration_since_epoch) = fetch_time() {
@@ -1243,10 +1273,13 @@ where
 		}
 
 		// Run persistence tasks in parallel and exit if any of them returns an error.
+		let t = Instant::now();
 		for res in futures.await {
 			res?;
 		}
+		let persist_us = t.elapsed().as_micros();
 
+		let t = Instant::now();
 		match check_and_reset_sleeper(&mut last_onion_message_handler_call, || {
 			sleeper(ONION_MESSAGE_HANDLER_TIMER)
 		}) {
@@ -1259,8 +1292,10 @@ where
 			Some(true) => break,
 			None => {},
 		}
+		let om_tick_us = t.elapsed().as_micros();
 
 		// Peer manager timer tick. If we were interrupted on a mobile platform, we disconnect all peers.
+		let t = Instant::now();
 		if await_slow {
 			// On various platforms, we may be starved of CPU cycles for several reasons.
 			// E.g. on iOS, if we've been in the background, we will be entirely paused.
@@ -1288,7 +1323,10 @@ where
 			}
 		}
 
+		let peer_mgr_tick_us = t.elapsed().as_micros();
+
 		// Rebroadcast pending claims.
+		let t = Instant::now();
 		match check_and_reset_sleeper(&mut last_rebroadcast_call, || sleeper(REBROADCAST_TIMER)) {
 			Some(false) => {
 				log_trace!(logger, "Rebroadcasting monitor's pending claims");
@@ -1297,6 +1335,23 @@ where
 			Some(true) => break,
 			None => {},
 		}
+		let rebroadcast_us = t.elapsed().as_micros();
+
+		let loop_us = loop_start.elapsed().as_micros();
+		let work_us = loop_us.saturating_sub(selector_us);
+		log_warn!(logger,
+			"[bg-processor] work={}us (loop={}us selector={}us wake={} persist={}us): \
+			cm_events={}us chain_mon={}us om_events={}us \
+			peer_mgr={}us htlc_fwd={}us \
+			cm_tick={}us{} prune={}us{} \
+			om_tick={}us peer_tick={}us rebroadcast={}us",
+			work_us, loop_us, selector_us, selector_wake, persist_us,
+			cm_events_us, chain_mon_events_us, om_events_us,
+			peer_mgr_events_us, htlc_fwd_us,
+			cm_tick_us, if cm_tick_fired { "(fired)" } else { "" },
+			prune_us, if prune_fired { "(fired)" } else { "" },
+			om_tick_us, peer_mgr_tick_us, rebroadcast_us,
+		);
 	}
 	log_trace!(logger, "Terminating background processor.");
 

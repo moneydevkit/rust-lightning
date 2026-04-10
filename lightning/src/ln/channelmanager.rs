@@ -7088,13 +7088,18 @@ where
 	/// Returns whether we have pending HTLC forwards that need to be processed via
 	/// [`Self::process_pending_htlc_forwards`].
 	pub fn needs_pending_htlc_processing(&self) -> bool {
-		if !self.forward_htlcs.lock().unwrap().is_empty() {
+		let forward_htlcs_count = self.forward_htlcs.lock().unwrap().len();
+		if forward_htlcs_count > 0 {
+			log_warn!(self.logger, "needs_pending_htlc_processing: forward_htlcs={}", forward_htlcs_count);
 			return true;
 		}
-		if !self.decode_update_add_htlcs.lock().unwrap().is_empty() {
+		let decode_count = self.decode_update_add_htlcs.lock().unwrap().len();
+		if decode_count > 0 {
+			log_warn!(self.logger, "needs_pending_htlc_processing: decode_update_add_htlcs={}", decode_count);
 			return true;
 		}
 		if self.pending_outbound_payments.needs_abandon_or_retry() {
+			// Detail logged inside needs_abandon_or_retry.
 			return true;
 		}
 		false
