@@ -173,11 +173,17 @@ where
 	K::Target: KVStore,
 {
 	pub fn enqueue<E: Into<LiquidityEvent>>(&self, event: E) {
+		let event = event.into();
 		let mut state_lock = self.0.state.lock().unwrap();
 		if state_lock.queue.len() < MAX_EVENT_QUEUE_SIZE {
-			state_lock.queue.push_back(event.into());
+			eprintln!(
+				"[EventQueue::enqueue] Pushing event (queue len before: {}): {:?}",
+				state_lock.queue.len(), event
+			);
+			state_lock.queue.push_back(event);
 			state_lock.needs_persist = true;
 		} else {
+			eprintln!("[EventQueue::enqueue] DROPPED event (queue full at {}): {:?}", MAX_EVENT_QUEUE_SIZE, event);
 			return;
 		}
 	}
@@ -188,15 +194,25 @@ where
 	K::Target: KVStore,
 {
 	fn drop(&mut self) {
-		let (should_notify, should_persist_notify) = {
+		let (should_notify, should_persist_notify, queue_len) = {
 			let state_lock = self.0.state.lock().unwrap();
-			(!state_lock.queue.is_empty(), state_lock.needs_persist)
+			(!state_lock.queue.is_empty(), state_lock.needs_persist, state_lock.queue.len())
 		};
 
 		if should_notify {
-			if let Some(waker) = self.0.waker.lock().unwrap().take() {
-				waker.wake();
-			}
+			let had_waker = {
+				let mut waker_lock = self.0.waker.lock().unwrap();
+				if let Some(waker) = waker_lock.take() {
+					waker.wake();
+					true
+				} else {
+					false
+				}
+			};
+			eprintln!(
+				"[EventQueue::Guard::drop] Notifying: queue_len={}, had_waker={}",
+				queue_len, had_waker
+			);
 
 			#[cfg(feature = "std")]
 			self.0.condvar.notify_one();
@@ -223,8 +239,14 @@ where
 	) -> core::task::Poll<Self::Output> {
 		let (res, should_persist_notify) = {
 			let mut state_lock = self.0.state.lock().unwrap();
+			let queue_len = state_lock.queue.len();
 			if let Some(event) = state_lock.queue.pop_front() {
+				let remaining = state_lock.queue.len();
 				state_lock.needs_persist = true;
+				eprintln!(
+					"[EventQueue::poll] Dequeued event (was {} in queue, {} remaining): {:?}",
+					queue_len, remaining, event
+				);
 				(Poll::Ready(event), true)
 			} else {
 				*self.0.waker.lock().unwrap() = Some(cx.waker().clone());
