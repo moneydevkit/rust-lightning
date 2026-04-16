@@ -706,6 +706,25 @@ where
 			htlcs.len()
 		);
 
+		// Channels exist but none are usable (reestablish in progress).
+		// Return empty actions. We can't forward and we must not decide to splice or
+		// open a new channel based on stale capacity. The timer retries once usable.
+		if !channels.is_empty() && channel_capacity_map.is_empty() {
+			log_info!(
+				self.logger,
+				"[LSPS4] calculate_htlc_actions: {} has {} channels but none usable yet \
+				 - deferring decision",
+				their_node_id,
+				channels.len()
+			);
+			return HtlcProcessingActions {
+				forwards: vec![],
+				new_channel_needed_msat: None,
+				splice_needed: None,
+				channel_count,
+			};
+		}
+
 		struct ComputedHtlc {
 			htlc: InterceptedHtlc,
 			amount_to_forward_msat: u64,
@@ -783,12 +802,13 @@ where
 					.fold(required_amount, |acc, h| acc.saturating_add(h.amount_to_forward_msat));
 
 				// Prefer splicing into the largest usable channel over opening a new one.
-				// Use is_channel_ready (not is_usable) so we prefer splice even during
-			// channel_reestablish. splice_channel() will fail if the channel isn't
-			// usable yet, and the timer will retry once reestablishment completes.
-			let splice_candidate = channels
+				// Only splice into usable channels. A mid-reestablish channel may
+				// already have sufficient capacity that just isn't visible yet;
+				// splice_channel() would also reject if the channel does become
+				// usable in time.
+				let splice_candidate = channels
 					.iter()
-					.filter(|c| c.is_channel_ready)
+					.filter(|c| c.is_usable)
 					.max_by_key(|c| c.channel_value_satoshis);
 
 				if let Some(candidate) = splice_candidate {
