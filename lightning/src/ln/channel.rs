@@ -6476,6 +6476,19 @@ fn get_holder_max_htlc_value_in_flight_msat(
 	channel_value_satoshis * 10 * configured_percent
 }
 
+fn rescale_max_htlc_value_in_flight_msat(
+	max_htlc_value_in_flight_msat: u64, old_channel_value_satoshis: u64,
+	new_channel_value_satoshis: u64,
+) -> u64 {
+	debug_assert_ne!(old_channel_value_satoshis, 0);
+	if old_channel_value_satoshis == 0 {
+		return max_htlc_value_in_flight_msat;
+	}
+
+	((max_htlc_value_in_flight_msat as u128 * new_channel_value_satoshis as u128)
+		/ old_channel_value_satoshis as u128) as u64
+}
+
 /// Returns a minimum channel reserve value the remote needs to maintain,
 /// required by us according to the configured or default
 /// [`ChannelHandshakeConfig::their_channel_reserve_proportional_millionths`]
@@ -11238,12 +11251,41 @@ where
 				.find(|funding| funding.get_funding_txid() == Some(splice_txid))
 				.unwrap();
 			let prev_funding_txid = self.funding.get_funding_txid();
+			let prev_channel_value_satoshis = self.funding.get_value_satoshis();
 
 			if let Some(scid) = self.funding.short_channel_id {
 				self.context.historical_scids.push(scid);
 			}
 
 			core::mem::swap(&mut self.funding, funding);
+			let new_channel_value_satoshis = self.funding.get_value_satoshis();
+			let prev_holder_max_htlc_value_in_flight_msat =
+				self.context.holder_max_htlc_value_in_flight_msat;
+			let prev_counterparty_max_htlc_value_in_flight_msat =
+				self.context.counterparty_max_htlc_value_in_flight_msat;
+			self.context.holder_max_htlc_value_in_flight_msat =
+				rescale_max_htlc_value_in_flight_msat(
+					self.context.holder_max_htlc_value_in_flight_msat,
+					prev_channel_value_satoshis,
+					new_channel_value_satoshis,
+				);
+			self.context.counterparty_max_htlc_value_in_flight_msat =
+				rescale_max_htlc_value_in_flight_msat(
+					self.context.counterparty_max_htlc_value_in_flight_msat,
+					prev_channel_value_satoshis,
+					new_channel_value_satoshis,
+				);
+			log_info!(
+				logger,
+				"Splice promotion HTLC caps for channel {}: holder {} -> {}, counterparty {} -> {}, value {} -> {} sats",
+				&self.context.channel_id,
+				prev_holder_max_htlc_value_in_flight_msat,
+				self.context.holder_max_htlc_value_in_flight_msat,
+				prev_counterparty_max_htlc_value_in_flight_msat,
+				self.context.counterparty_max_htlc_value_in_flight_msat,
+				prev_channel_value_satoshis,
+				new_channel_value_satoshis,
+			);
 
 			// The swap above places the previous `FundingScope` into `pending_funding`.
 			pending_splice
