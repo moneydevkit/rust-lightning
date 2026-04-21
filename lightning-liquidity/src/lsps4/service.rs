@@ -239,14 +239,29 @@ where
 					);
 				}
 
+				// Always persist before calculating actions. execute_htlc_actions
+				// removes the HTLC on successful forward. For the liquidity path
+				// (splice/open) the HTLC must survive in the store so the timer
+				// can forward it once the new channel is ready.
+				let persisted = match self.htlc_store.insert(htlc.clone()) {
+					Ok(_) => true,
+					Err(e) => {
+						log_error!(
+							self.logger,
+							"[LSPS4] htlc_intercepted: failed to persist HTLC {:?}, \
+							 payment_hash: {}, error: {}",
+							intercept_id,
+							payment_hash,
+							e
+						);
+						false
+					}
+				};
+
 				let actions = self.calculate_htlc_actions_for_peer(
 					counterparty_node_id,
-					vec![htlc.clone()],
+					vec![htlc],
 				);
-
-				if actions.needs_liquidity_action() {
-					self.htlc_store.insert(htlc).unwrap();
-				}
 
 				log_debug!(
 					self.logger,
@@ -255,6 +270,27 @@ where
 					actions
 				);
 
+				// Liquidity actions (splice/open) are async — the timer forwards
+				// the HTLC once the channel is ready. Without persistence the
+				// splice/open fires but the HTLC is never forwarded, wasting
+				// on-chain fees for a payment that times out anyway.
+				if !persisted && actions.needs_liquidity_action() {
+					log_error!(
+						self.logger,
+						"[LSPS4] htlc_intercepted: liquidity action needed but HTLC {:?} \
+						 not persisted, failing back to sender. payment_hash: {}",
+						intercept_id,
+						payment_hash
+					);
+					let _ = self.channel_manager.get_cm().fail_intercepted_htlc(intercept_id);
+					return Ok(());
+				}
+
+				// Forward-only path is fine without persistence — the HTLC is
+				// consumed immediately by forward_intercepted_htlc. When persisted,
+				// the store entry also covers the TOCTOU race where the channel
+				// becomes unusable between calculate and execute; the timer retries
+				// from the store.
 				self.execute_htlc_actions(actions, counterparty_node_id.clone());
 			}
 		} else {
@@ -670,6 +706,25 @@ where
 			htlcs.len()
 		);
 
+		// Channels exist but none are usable (reestablish in progress).
+		// Return empty actions. We can't forward and we must not decide to splice or
+		// open a new channel based on stale capacity. The timer retries once usable.
+		if !channels.is_empty() && channel_capacity_map.is_empty() {
+			log_info!(
+				self.logger,
+				"[LSPS4] calculate_htlc_actions: {} has {} channels but none usable yet \
+				 - deferring decision",
+				their_node_id,
+				channels.len()
+			);
+			return HtlcProcessingActions {
+				forwards: vec![],
+				new_channel_needed_msat: None,
+				splice_needed: None,
+				channel_count,
+			};
+		}
+
 		struct ComputedHtlc {
 			htlc: InterceptedHtlc,
 			amount_to_forward_msat: u64,
@@ -747,12 +802,13 @@ where
 					.fold(required_amount, |acc, h| acc.saturating_add(h.amount_to_forward_msat));
 
 				// Prefer splicing into the largest usable channel over opening a new one.
-				// Use is_channel_ready (not is_usable) so we prefer splice even during
-			// channel_reestablish. splice_channel() will fail if the channel isn't
-			// usable yet, and the timer will retry once reestablishment completes.
-			let splice_candidate = channels
+				// Only splice into usable channels. A mid-reestablish channel may
+				// already have sufficient capacity that just isn't visible yet;
+				// splice_channel() would also reject if the channel does become
+				// usable in time.
+				let splice_candidate = channels
 					.iter()
-					.filter(|c| c.is_channel_ready)
+					.filter(|c| c.is_usable)
 					.max_by_key(|c| c.channel_value_satoshis);
 
 				if let Some(candidate) = splice_candidate {
