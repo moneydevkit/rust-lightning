@@ -824,15 +824,17 @@ fn test_splice_in() {
 	mine_transaction(&nodes[0], &splice_tx);
 	mine_transaction(&nodes[1], &splice_tx);
 
-	let htlc_limit_msat = nodes[0].node.list_channels()[0].next_outbound_htlc_limit_msat;
-	assert!(htlc_limit_msat < initial_channel_value_sat * 1000);
-	let _ = send_payment(&nodes[0], &[&nodes[1]], htlc_limit_msat);
+	let pre_splice_htlc_limit_msat = nodes[0].node.list_channels()[0].next_outbound_htlc_limit_msat;
+	assert!(pre_splice_htlc_limit_msat < initial_channel_value_sat * 1000);
+	let _ = send_payment(&nodes[0], &[&nodes[1]], pre_splice_htlc_limit_msat);
 
 	lock_splice_after_blocks(&nodes[0], &nodes[1], ANTI_REORG_DELAY - 1);
 
-	let htlc_limit_msat = nodes[0].node.list_channels()[0].next_outbound_htlc_limit_msat;
-	assert!(htlc_limit_msat > initial_channel_value_sat);
-	let _ = send_payment(&nodes[0], &[&nodes[1]], htlc_limit_msat);
+	let post_splice_htlc_limit_msat =
+		nodes[0].node.list_channels()[0].next_outbound_htlc_limit_msat;
+	assert!(post_splice_htlc_limit_msat > pre_splice_htlc_limit_msat);
+	assert!(post_splice_htlc_limit_msat > initial_channel_value_sat * 1000);
+	let _ = send_payment(&nodes[0], &[&nodes[1]], post_splice_htlc_limit_msat);
 }
 
 #[test]
