@@ -218,7 +218,6 @@ where
 					.get_cm()
 					.list_channels_with_counterparty(&counterparty_node_id);
 				let any_usable = channels.iter().any(|ch| ch.is_usable);
-				let has_channels = !channels.is_empty();
 
 				log_info!(
 					self.logger,
@@ -240,40 +239,23 @@ where
 					);
 				}
 
-				if has_channels && !any_usable {
-					// Channels exist but none usable yet (channel_reestablish in progress).
-					// Defer until process_pending_htlcs picks them up.
-					log_info!(
-						self.logger,
-						"[LSPS4] htlc_intercepted: peer {} has {} channels but none usable, \
-						 deferring HTLC until channel_reestablish completes. payment_hash: {}",
-						counterparty_node_id,
-						channels.len(),
-						payment_hash
-					);
+				let actions = self.calculate_htlc_actions_for_peer(
+					counterparty_node_id,
+					vec![htlc.clone()],
+				);
+
+				if actions.needs_liquidity_action() {
 					self.htlc_store.insert(htlc).unwrap();
-				} else {
-					// Either channels are usable, or no channels exist (need JIT open).
-					// calculate_htlc_actions_for_peer handles both: forward through usable
-					// channels, or emit OpenChannel event when no capacity exists.
-					let actions = self.calculate_htlc_actions_for_peer(
-						counterparty_node_id,
-						vec![htlc.clone()],
-					);
-
-					if actions.needs_liquidity_action() {
-						self.htlc_store.insert(htlc).unwrap();
-					}
-
-					log_debug!(
-						self.logger,
-						"[LSPS4] htlc_intercepted: calculated actions for peer {}: {:?}",
-						counterparty_node_id,
-						actions
-					);
-
-					self.execute_htlc_actions(actions, counterparty_node_id.clone());
 				}
+
+				log_debug!(
+					self.logger,
+					"[LSPS4] htlc_intercepted: calculated actions for peer {}: {:?}",
+					counterparty_node_id,
+					actions
+				);
+
+				self.execute_htlc_actions(actions, counterparty_node_id.clone());
 			}
 		} else {
 			log_error!(
@@ -414,28 +396,7 @@ where
 			}
 		}
 
-		if self.has_usable_channel(&counterparty_node_id) || channels.is_empty() {
-			// Either channels are usable (forward immediately) or no channels exist
-			// at all (process_htlcs_for_peer will trigger OpenChannel for JIT).
-			self.process_htlcs_for_peer(counterparty_node_id.clone(), htlcs);
-		} else {
-			// Channels exist but none usable yet (reestablish in progress).
-			// We still call process_htlcs_for_peer because calculate_htlc_actions
-			// skips non-usable channels. If existing capacity is insufficient, this
-			// will emit OpenChannel now rather than deferring to process_pending_htlcs
-			// (which would never open a channel). Forwards through existing channels
-			// will be empty since none are usable, so no premature forwarding occurs.
-			// The actual forwards happen later via channel_ready or process_pending_htlcs
-			// once reestablish completes.
-			log_info!(
-				self.logger,
-				"[LSPS4] peer_connected: {} has {} pending HTLCs, channels not yet usable \
-				 (reestablish in progress) - checking if new channel needed",
-				counterparty_node_id,
-				htlcs.len()
-			);
-			self.process_htlcs_for_peer(counterparty_node_id.clone(), htlcs);
-		}
+		self.process_htlcs_for_peer(counterparty_node_id.clone(), htlcs);
 
 		log_info!(
 			self.logger,
@@ -589,11 +550,14 @@ where
 			}
 
 			if self.has_usable_channel(&node_id) {
-				let actions = self.calculate_htlc_actions_for_peer(node_id, htlcs);
-				if actions.is_empty() {
-					continue;
-				}
-				self.execute_htlc_actions(actions, node_id);
+				// Channel reestablish completed — attempt to forward the deferred HTLCs.
+				log_info!(
+					self.logger,
+					"[LSPS4] process_pending_htlcs: forwarding {} HTLCs for peer {} (channel now usable)",
+					htlcs.len(),
+					node_id
+				);
+				self.process_htlcs_for_peer(node_id, htlcs);
 			}
 		}
 	}
@@ -835,12 +799,14 @@ where
 
 		// Execute forwards
 		for forward_action in forwards {
-			// Re-check peer liveness right before forwarding to narrow the
-			// TOCTOU window between the usability check and the actual forward.
-			if !self.is_peer_connected(&their_node_id) {
+			// Re-check channel usability right before forwarding to narrow the
+			// TOCTOU window. Covers both peer disconnect and disconnect+reconnect
+			// (where the peer is connected but the channel is still reestablishing).
+			if !self.has_usable_channel(&their_node_id) {
 				log_info!(
 					self.logger,
-					"[LSPS4] execute_htlc_actions: peer {} disconnected before forward, 					 skipping HTLC {:?} (will retry on next timer tick). payment_hash: {}",
+					"[LSPS4] execute_htlc_actions: no usable channel for peer {}, \
+					 skipping HTLC {:?} (will retry on next timer tick). payment_hash: {}",
 					their_node_id,
 					forward_action.htlc.id(),
 					forward_action.htlc.payment_hash()
