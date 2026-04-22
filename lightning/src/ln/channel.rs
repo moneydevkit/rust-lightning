@@ -8321,6 +8321,14 @@ where
 		{
 			self.free_holding_cell_htlcs(fee_estimator, logger)
 		} else {
+			if !self.context.holding_cell_htlc_updates.is_empty()
+				|| self.context.holding_cell_update_fee.is_some()
+			{
+				self.log_forward_diagnostics(
+					logger,
+					"maybe_free_holding_cell_htlcs: skipped (stuck)",
+				);
+			}
 			(None, Vec::new())
 		}
 	}
@@ -8405,8 +8413,10 @@ where
 								);
 								update_add_count += 1;
 							},
-							Err((_, msg)) => {
-								log_info!(logger, "Failed to send HTLC with payment_hash {} due to {} in channel {}", &payment_hash, msg, &self.context.channel_id());
+							Err((reason, msg)) => {
+								log_info!(logger,
+									"[diag] free_holding_cell_htlcs: failing HTLC payment_hash {} amt {}msat on channel {} - reason: {:?}, msg: {}. This HTLC will be failed backwards with TemporaryChannelFailure.",
+									&payment_hash, amount_msat, &self.context.channel_id(), reason, msg);
 								// If we fail to send here, then this HTLC should be failed
 								// backwards. Failing to send here indicates that this HTLC may
 								// keep being put back into the holding cell without ever being
@@ -10973,6 +10983,39 @@ where
 
 	pub fn blocked_monitor_updates_pending(&self) -> usize {
 		self.context.blocked_monitor_updates.len()
+	}
+
+	/// Logs detailed channel state useful for diagnosing holding-cell and
+	/// `TemporaryChannelFailure` races. Emits counts of holding-cell HTLCs,
+	/// pending HTLCs, quiescence flags, and monitor-update state at info level.
+	/// `call_site` is a short prefix identifying the caller (e.g.
+	/// "forward_intercepted_htlc", "maybe_free_holding_cell_htlcs").
+	#[rustfmt::skip]
+	pub(super) fn log_forward_diagnostics<L: Deref>(&self, logger: &L, call_site: &str)
+	where L::Target: Logger,
+	{
+		log_info!(logger,
+			"[diag] {}: channel {} - holding_cell_htlcs: {}, holding_cell_update_fee: {}, \
+			 pending_outbound_htlcs: {}, pending_inbound_htlcs: {}, pending_update_fee: {}, \
+			 is_awaiting_remote_revoke: {}, expecting_peer_commitment_signed: {}, \
+			 is_waiting_on_peer_pending_channel_update: {}, \
+			 is_monitor_update_in_progress: {}, blocked_monitor_updates: {}, \
+			 is_quiescent: {}, can_generate_new_commitment: {}",
+			call_site,
+			self.context.channel_id(),
+			self.context.holding_cell_htlc_updates.len(),
+			self.context.holding_cell_update_fee.is_some(),
+			self.context.pending_outbound_htlcs.len(),
+			self.context.pending_inbound_htlcs.len(),
+			self.context.pending_update_fee.is_some(),
+			self.context.channel_state.is_awaiting_remote_revoke(),
+			self.context.expecting_peer_commitment_signed,
+			self.context.is_waiting_on_peer_pending_channel_update(),
+			self.context.channel_state.is_monitor_update_in_progress(),
+			self.context.blocked_monitor_updates.len(),
+			self.context.channel_state.is_quiescent(),
+			self.context.channel_state.can_generate_new_commitment(),
+		);
 	}
 
 	/// Returns true if the channel is awaiting the persistence of the initial ChannelMonitor.

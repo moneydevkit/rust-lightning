@@ -6738,6 +6738,8 @@ where
 							"forward_intercepted_htlc: channel {} - is_usable: {}, is_live: {}, is_connected: {}, peer_state.is_connected: {}",
 							next_hop_channel_id, is_usable, is_live, is_connected, peer_state.is_connected
 						);
+						funded_chan
+							.log_forward_diagnostics(&&entry_logger, "forward_intercepted_htlc");
 						if !is_usable {
 							return Err(APIError::ChannelUnavailable {
 								err: format!(
@@ -8505,7 +8507,21 @@ where
 			}
 		};
 
+		let fail_logger = WithContext::from(
+			&self.logger,
+			Some(*counterparty_node_id),
+			Some(channel_id),
+			None,
+		);
+		log_info!(fail_logger,
+			"[diag] fail_holding_cell_htlcs: failing {} HTLC(s) on channel {} peer {} with reason {:?}",
+			htlcs_to_fail.len(), channel_id, counterparty_node_id, failure_reason
+		);
 		for (htlc_src, payment_hash) in htlcs_to_fail.drain(..) {
+			log_info!(fail_logger,
+				"[diag] fail_holding_cell_htlcs: failing backwards payment_hash {} on channel {} with {:?}",
+				payment_hash, channel_id, failure_reason
+			);
 			let reason = HTLCFailReason::reason(failure_reason, onion_failure_data.clone());
 			let receiver = HTLCHandlingFailureType::Forward {
 				node_id: Some(counterparty_node_id.clone()),
