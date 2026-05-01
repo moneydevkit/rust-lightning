@@ -13711,8 +13711,10 @@ where
 		provided_node_features(&self.config.read().unwrap())
 	}
 
-	fn provided_init_features(&self, _their_init_features: PublicKey) -> InitFeatures {
-		provided_init_features(&self.config.read().unwrap())
+	fn provided_init_features(&self, their_node_id: PublicKey) -> InitFeatures {
+		let mut features = provided_init_features(&self.config.read().unwrap());
+		strip_acinq_splice_prototype(&mut features, &their_node_id);
+		features
 	}
 
 	#[rustfmt::skip]
@@ -15667,6 +15669,11 @@ where
 
 /// Fetches the set of [`NodeFeatures`] flags that are provided by or required by
 /// [`ChannelManager`].
+///
+/// Note: the ACINQ splice-prototype carve-out applied in
+/// [`BaseMessageHandler::provided_init_features`] is intentionally *not*
+/// applied here. The issue with dual-advertise is in `Init`, not in
+/// gossip `node_announcement`s, and gossip is broadcast not per-peer.
 pub(crate) fn provided_node_features(config: &UserConfig) -> NodeFeatures {
 	let mut node_features = provided_init_features(config).to_context();
 	node_features.set_keysend_optional();
@@ -15701,6 +15708,25 @@ pub(crate) fn provided_channel_type_features(config: &UserConfig) -> ChannelType
 	ChannelTypeFeatures::from_init(&provided_init_features(config))
 }
 
+/// ACINQ mainnet node id. Eclair (ACINQ's stack) chokes on dual-advertise of
+/// the splice prototype (bit 155) and production (bit 63) feature bits, so we
+/// strip the prototype bit when peering with this specific node. ACINQ has
+/// already moved to bit 63 so they will accept splice via the production bit.
+/// See MDK-799.
+const ACINQ_MAINNET_NODE_ID: [u8; 33] = [
+	0x03, 0x86, 0x4e, 0xf0, 0x25, 0xfd, 0xe8, 0xfb, 0x58, 0x7d, 0x98, 0x91, 0x86, 0xce, 0x6a, 0x4a,
+	0x18, 0x68, 0x95, 0xee, 0x44, 0xa9, 0x26, 0xbf, 0xc3, 0x70, 0xe2, 0xc3, 0x66, 0x59, 0x7a, 0x3f,
+	0x8f,
+];
+
+/// If `their_node_id` is the ACINQ mainnet node, clear the splice prototype
+/// (bit 155) feature. See [`ACINQ_MAINNET_NODE_ID`] for context.
+fn strip_acinq_splice_prototype(features: &mut InitFeatures, their_node_id: &PublicKey) {
+	if their_node_id.serialize() == ACINQ_MAINNET_NODE_ID {
+		features.clear_splicing();
+	}
+}
+
 /// Fetches the set of [`InitFeatures`] flags that are provided by or required by
 /// [`ChannelManager`].
 pub fn provided_init_features(config: &UserConfig) -> InitFeatures {
@@ -15725,6 +15751,9 @@ pub fn provided_init_features(config: &UserConfig) -> InitFeatures {
 	features.set_simple_close_optional();
 	features.set_quiescence_optional();
 	features.set_splicing_optional();
+	// Dual-advertise alongside the prototype bit during the LDK 0.2.2 migration.
+	// Stripped per-peer for ACINQ in the BaseMessageHandler impl above. See MDK-799.
+	features.set_splicing_production_optional();
 
 	if config.channel_handshake_config.negotiate_anchors_zero_fee_htlc_tx {
 		features.set_anchors_zero_fee_htlc_tx_optional();
