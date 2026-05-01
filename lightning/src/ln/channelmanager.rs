@@ -15669,6 +15669,11 @@ where
 
 /// Fetches the set of [`NodeFeatures`] flags that are provided by or required by
 /// [`ChannelManager`].
+///
+/// Note: the ACINQ splice-prototype carve-out applied in
+/// [`BaseMessageHandler::provided_init_features`] is intentionally *not*
+/// applied here. The issue with dual-advertise is in `Init`, not in
+/// gossip `node_announcement`s, and gossip is broadcast not per-peer.
 pub(crate) fn provided_node_features(config: &UserConfig) -> NodeFeatures {
 	let mut node_features = provided_init_features(config).to_context();
 	node_features.set_keysend_optional();
@@ -15746,6 +15751,9 @@ pub fn provided_init_features(config: &UserConfig) -> InitFeatures {
 	features.set_simple_close_optional();
 	features.set_quiescence_optional();
 	features.set_splicing_optional();
+	// Dual-advertise alongside the prototype bit during the LDK 0.2.2 migration.
+	// Stripped per-peer for ACINQ in the BaseMessageHandler impl above. See MDK-799.
+	features.set_splicing_production_optional();
 
 	if config.channel_handshake_config.negotiate_anchors_zero_fee_htlc_tx {
 		features.set_anchors_zero_fee_htlc_tx_optional();
