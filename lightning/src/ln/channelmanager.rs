@@ -13711,8 +13711,10 @@ where
 		provided_node_features(&self.config.read().unwrap())
 	}
 
-	fn provided_init_features(&self, _their_init_features: PublicKey) -> InitFeatures {
-		provided_init_features(&self.config.read().unwrap())
+	fn provided_init_features(&self, their_node_id: PublicKey) -> InitFeatures {
+		let mut features = provided_init_features(&self.config.read().unwrap());
+		strip_acinq_splice_prototype(&mut features, &their_node_id);
+		features
 	}
 
 	#[rustfmt::skip]
@@ -15699,6 +15701,25 @@ pub(crate) fn provided_channel_features(config: &UserConfig) -> ChannelFeatures 
 /// [`ChannelManager`].
 pub(crate) fn provided_channel_type_features(config: &UserConfig) -> ChannelTypeFeatures {
 	ChannelTypeFeatures::from_init(&provided_init_features(config))
+}
+
+/// ACINQ mainnet node id. Eclair (ACINQ's stack) chokes on dual-advertise of
+/// the splice prototype (bit 155) and production (bit 63) feature bits, so we
+/// strip the prototype bit when peering with this specific node. ACINQ has
+/// already moved to bit 63 so they will accept splice via the production bit.
+/// See MDK-799.
+const ACINQ_MAINNET_NODE_ID: [u8; 33] = [
+	0x03, 0x86, 0x4e, 0xf0, 0x25, 0xfd, 0xe8, 0xfb, 0x58, 0x7d, 0x98, 0x91, 0x86, 0xce, 0x6a, 0x4a,
+	0x18, 0x68, 0x95, 0xee, 0x44, 0xa9, 0x26, 0xbf, 0xc3, 0x70, 0xe2, 0xc3, 0x66, 0x59, 0x7a, 0x3f,
+	0x8f,
+];
+
+/// If `their_node_id` is the ACINQ mainnet node, clear the splice prototype
+/// (bit 155) feature. See [`ACINQ_MAINNET_NODE_ID`] for context.
+fn strip_acinq_splice_prototype(features: &mut InitFeatures, their_node_id: &PublicKey) {
+	if their_node_id.serialize() == ACINQ_MAINNET_NODE_ID {
+		features.clear_splicing();
+	}
 }
 
 /// Fetches the set of [`InitFeatures`] flags that are provided by or required by
