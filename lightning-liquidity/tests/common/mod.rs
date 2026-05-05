@@ -6,7 +6,7 @@ use lightning_liquidity::{LiquidityClientConfig, LiquidityManagerSync, Liquidity
 use lightning::chain::{BestBlock, Filter};
 use lightning::ln::channelmanager::ChainParameters;
 use lightning::ln::functional_test_utils::{Node, TestChannelManager};
-use lightning::util::test_utils::{TestBroadcaster, TestKeysInterface, TestStore};
+use lightning::util::test_utils::{TestBroadcaster, TestKeysInterface, TestLogger, TestStore};
 
 use bitcoin::Network;
 
@@ -47,6 +47,7 @@ fn build_service_and_client_nodes<'a, 'b, 'c>(
 		Some(service_config),
 		None,
 		Arc::clone(&time_provider),
+		service_inner.logger,
 	)
 	.unwrap();
 
@@ -61,6 +62,7 @@ fn build_service_and_client_nodes<'a, 'b, 'c>(
 		None,
 		Some(client_config),
 		time_provider,
+		client_inner.logger,
 	)
 	.unwrap();
 
@@ -141,6 +143,7 @@ pub(crate) struct LiquidityNode<'a, 'b, 'c> {
 		Arc<TestStore>,
 		Arc<dyn TimeProvider + Send + Sync>,
 		&'c TestBroadcaster,
+		&'c TestLogger,
 	>,
 }
 
@@ -155,6 +158,7 @@ impl<'a, 'b, 'c> LiquidityNode<'a, 'b, 'c> {
 			Arc<TestStore>,
 			Arc<dyn TimeProvider + Send + Sync>,
 			&'c TestBroadcaster,
+			&'c TestLogger,
 		>,
 	) -> Self {
 		Self { inner: node, liquidity_manager }
