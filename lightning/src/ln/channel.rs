@@ -3014,6 +3014,7 @@ where
 	counterparty_max_accepted_htlcs: u16,
 	holder_max_accepted_htlcs: u16,
 	minimum_depth: Option<u32>,
+	splice_minimum_depth: Option<u32>,
 
 	counterparty_forwarding_info: Option<CounterpartyForwardingInfo>,
 
@@ -3658,6 +3659,7 @@ where
 			counterparty_max_accepted_htlcs: open_channel_fields.max_accepted_htlcs,
 			holder_max_accepted_htlcs: cmp::min(config.channel_handshake_config.our_max_accepted_htlcs, max_htlcs(&channel_type)),
 			minimum_depth,
+			splice_minimum_depth: config.channel_handshake_config.splice_minimum_depth,
 
 			counterparty_forwarding_info: None,
 
@@ -3898,6 +3900,7 @@ where
 			counterparty_max_accepted_htlcs: 0,
 			holder_max_accepted_htlcs: cmp::min(config.channel_handshake_config.our_max_accepted_htlcs, max_htlcs(&channel_type)),
 			minimum_depth: None, // Filled in in accept_channel
+			splice_minimum_depth: config.channel_handshake_config.splice_minimum_depth,
 
 			counterparty_forwarding_info: None,
 
@@ -8958,10 +8961,16 @@ where
 
 		if let Some(pending_splice) = self.pending_splice.as_mut() {
 			self.context.channel_state.clear_quiescent();
-			if let Some(FundingNegotiation::AwaitingSignatures { mut funding, .. }) =
+			if let Some(FundingNegotiation::AwaitingSignatures { mut funding, is_initiator }) =
 				pending_splice.funding_negotiation.take()
 			{
 				funding.funding_transaction = Some(funding_tx);
+
+				if !is_initiator {
+					if let Some(depth) = self.context.splice_minimum_depth {
+						funding.minimum_depth_override = Some(depth);
+					}
+				}
 
 				let funding_txo =
 					funding.get_funding_txo().expect("funding outpoint should be set");
@@ -14905,6 +14914,7 @@ where
 			(65, self.quiescent_action, option), // Added in 0.2
 			(67, pending_outbound_held_htlc_flags, optional_vec), // Added in 0.2
 			(69, holding_cell_held_htlc_flags, optional_vec), // Added in 0.2
+			(71, self.context.splice_minimum_depth, option),
 		});
 
 		Ok(())
@@ -15272,6 +15282,7 @@ where
 
 		let mut pending_outbound_held_htlc_flags_opt: Option<Vec<Option<()>>> = None;
 		let mut holding_cell_held_htlc_flags_opt: Option<Vec<Option<()>>> = None;
+		let mut splice_minimum_depth: Option<u32> = None;
 
 		read_tlv_fields!(reader, {
 			(0, announcement_sigs, option),
@@ -15319,6 +15330,7 @@ where
 			(65, quiescent_action, upgradable_option), // Added in 0.2
 			(67, pending_outbound_held_htlc_flags_opt, optional_vec), // Added in 0.2
 			(69, holding_cell_held_htlc_flags_opt, optional_vec), // Added in 0.2
+			(71, splice_minimum_depth, option),
 		});
 
 		let holder_signer = signer_provider.derive_channel_signer(channel_keys_id);
@@ -15708,6 +15720,7 @@ where
 				is_manual_broadcast: is_manual_broadcast.unwrap_or(false),
 
 				interactive_tx_signing_session,
+				splice_minimum_depth,
 			},
 			holder_commitment_point,
 			pending_splice,
