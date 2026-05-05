@@ -59,6 +59,7 @@ pub(crate) fn lsps5_test_setup_with_kv_stores<'a, 'b, 'c>(
 		#[cfg(lsps1_service)]
 		lsps1_service_config: None,
 		lsps2_service_config: None,
+		lsps4_service_config: None,
 		lsps5_service_config: Some(lsps5_service_config),
 		advertise_service: true,
 	};
@@ -68,6 +69,7 @@ pub(crate) fn lsps5_test_setup_with_kv_stores<'a, 'b, 'c>(
 	let client_config = LiquidityClientConfig {
 		lsps1_client_config: None,
 		lsps2_client_config: None,
+		lsps4_client_config: None,
 		lsps5_client_config: Some(lsps5_client_config),
 	};
 
@@ -243,6 +245,7 @@ pub(crate) fn lsps5_lsps2_test_setup<'a, 'b, 'c>(
 		#[cfg(lsps1_service)]
 		lsps1_service_config: None,
 		lsps2_service_config: Some(lsps2_service_config),
+		lsps4_service_config: None,
 		lsps5_service_config: Some(lsps5_service_config),
 		advertise_service: true,
 	};
@@ -252,6 +255,7 @@ pub(crate) fn lsps5_lsps2_test_setup<'a, 'b, 'c>(
 	let client_config = LiquidityClientConfig {
 		lsps1_client_config: None,
 		lsps2_client_config: Some(lsps2_client_config),
+		lsps4_client_config: None,
 		lsps5_client_config: Some(lsps5_client_config),
 	};
 
@@ -1519,6 +1523,7 @@ fn lsps5_service_handler_persistence_across_restarts() {
 		#[cfg(lsps1_service)]
 		lsps1_service_config: None,
 		lsps2_service_config: None,
+		lsps4_service_config: None,
 		lsps5_service_config: Some(LSPS5ServiceConfig::default()),
 		advertise_service: true,
 	};
@@ -1619,6 +1624,7 @@ fn lsps5_service_handler_persistence_across_restarts() {
 			Some(service_config),
 			None,
 			Arc::clone(&time_provider),
+			nodes_restart[0].logger,
 		)
 		.unwrap();
 

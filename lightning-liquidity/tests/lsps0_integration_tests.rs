@@ -40,6 +40,7 @@ fn list_protocols_integration_test() {
 		#[cfg(lsps1_service)]
 		lsps1_service_config: Some(lsps1_service_config),
 		lsps2_service_config: Some(lsps2_service_config),
+		lsps4_service_config: None,
 		lsps5_service_config: Some(lsps5_service_config),
 		advertise_service: true,
 	};
@@ -54,6 +55,7 @@ fn list_protocols_integration_test() {
 		#[cfg(not(lsps1_service))]
 		lsps1_client_config: None,
 		lsps2_client_config: Some(lsps2_client_config),
+		lsps4_client_config: None,
 		lsps5_client_config: Some(lsps5_client_config),
 	};
 

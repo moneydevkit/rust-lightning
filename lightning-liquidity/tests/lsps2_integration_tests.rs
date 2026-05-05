@@ -73,6 +73,7 @@ fn build_lsps2_configs() -> ([u8; 32], LiquidityServiceConfig, LiquidityClientCo
 		#[cfg(lsps1_service)]
 		lsps1_service_config: None,
 		lsps2_service_config: Some(lsps2_service_config),
+		lsps4_service_config: None,
 		lsps5_service_config: None,
 		advertise_service: true,
 	};
@@ -81,6 +82,7 @@ fn build_lsps2_configs() -> ([u8; 32], LiquidityServiceConfig, LiquidityClientCo
 	let client_config = LiquidityClientConfig {
 		lsps1_client_config: None,
 		lsps2_client_config: Some(lsps2_client_config),
+		lsps4_client_config: None,
 		lsps5_client_config: None,
 	};
 
@@ -958,6 +960,7 @@ fn lsps2_service_handler_persistence_across_restarts() {
 		#[cfg(lsps1_service)]
 		lsps1_service_config: None,
 		lsps2_service_config: Some(LSPS2ServiceConfig { promise_secret }),
+		lsps4_service_config: None,
 		lsps5_service_config: None,
 		advertise_service: true,
 	};
@@ -1102,6 +1105,7 @@ fn lsps2_service_handler_persistence_across_restarts() {
 			Some(service_config),
 			None,
 			time_provider,
+			nodes_restart[0].logger,
 		)
 		.unwrap();
 
