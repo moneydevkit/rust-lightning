@@ -15743,28 +15743,7 @@ pub(crate) fn hold_time_since(send_timestamp: Option<Duration>) -> Option<u32> {
 
 #[cfg(test)]
 mod tests {
-	use std::cmp;
-	use bitcoin::amount::Amount;
-	use bitcoin::constants::ChainHash;
-	use bitcoin::script::{ScriptBuf, Builder};
-	use bitcoin::transaction::{Transaction, TxOut, Version};
-	use bitcoin::opcodes;
-	use bitcoin::network::Network;
-	use crate::ln::onion_utils::INVALID_ONION_BLINDING;
-	use crate::types::payment::{PaymentHash, PaymentPreimage};
-	use crate::ln::channel_keys::{RevocationKey, RevocationBasepoint};
-	use crate::ln::channelmanager::{self, HTLCSource, PaymentId};
-	use crate::ln::channel::InitFeatures;
-	use crate::ln::channel::{AwaitingChannelReadyFlags, Channel, ChannelState, InboundHTLCOutput, OutboundV1Channel, InboundV1Channel, OutboundHTLCOutput, InboundHTLCState, OutboundHTLCState, HTLCCandidate, HTLCInitiator, HTLCUpdateAwaitingACK, commit_tx_fee_sat};
-	use crate::ln::channel::{MAX_FUNDING_SATOSHIS_NO_WUMBO, TOTAL_BITCOIN_SUPPLY_SATOSHIS};
-	use crate::types::features::{ChannelFeatures, ChannelTypeFeatures, NodeFeatures};
-	use crate::ln::msgs;
-	use crate::ln::msgs::{ChannelUpdate, DecodeError, UnsignedChannelUpdate, MAX_VALUE_MSAT};
-	use crate::ln::script::ShutdownScript;
-	use crate::ln::chan_utils::{self, htlc_success_tx_weight, htlc_timeout_tx_weight};
-	use crate::chain::BestBlock;
-	use crate::chain::chaininterface::{FeeEstimator, LowerBoundedFeeEstimator, ConfirmationTarget};
-	use crate::sign::{ChannelSigner, InMemorySigner, EntropySource, SignerProvider};
+	use crate::chain::chaininterface::LowerBoundedFeeEstimator;
 	use crate::chain::transaction::OutPoint;
 	use crate::chain::BestBlock;
 	use crate::ln::chan_utils::{self, commit_tx_fee_sat, ChannelTransactionParameters};
@@ -16290,8 +16269,8 @@ mod tests {
 		outbound_node_config.channel_handshake_config.their_channel_reserve_proportional_millionths = (outbound_selected_channel_reserve_perc * 1_000_000.0) as u32;
 		let mut chan = OutboundV1Channel::<&TestKeysInterface>::new(&&fee_est, &&keys_provider, &&keys_provider, outbound_node_id, &channelmanager::provided_init_features(&outbound_node_config), channel_value_satoshis, 100_000, 42, &outbound_node_config, 0, 42, None, &logger).unwrap();
 
-		let expected_outbound_selected_chan_reserve = cmp::max(outbound_node_config.channel_handshake_config.min_their_channel_reserve_satoshis, (chan.context.channel_value_satoshis as f64 * outbound_selected_channel_reserve_perc) as u64);
-		assert_eq!(chan.context.holder_selected_channel_reserve_satoshis, expected_outbound_selected_chan_reserve);
+		let expected_outbound_selected_chan_reserve = cmp::max(outbound_node_config.channel_handshake_config.min_their_channel_reserve_satoshis, (chan.funding.get_value_satoshis() as f64 * outbound_selected_channel_reserve_perc) as u64);
+		assert_eq!(chan.funding.holder_selected_channel_reserve_satoshis, expected_outbound_selected_chan_reserve);
 
 		let chan_open_channel_msg = chan.get_open_channel(ChainHash::using_genesis_block(network), &&logger).unwrap();
 		let mut inbound_node_config = UserConfig::default();
@@ -16300,7 +16279,7 @@ mod tests {
 		if outbound_selected_channel_reserve_perc + inbound_selected_channel_reserve_perc < 1.0 {
 			let chan_inbound_node = InboundV1Channel::<&TestKeysInterface>::new(&&fee_est, &&keys_provider, &&keys_provider, inbound_node_id, &channelmanager::provided_channel_type_features(&inbound_node_config), &channelmanager::provided_init_features(&outbound_node_config), &chan_open_channel_msg, 7, &inbound_node_config, 0, &&logger, /*is_0conf=*/false).unwrap();
 
-			let expected_inbound_selected_chan_reserve = cmp::max(inbound_node_config.channel_handshake_config.min_their_channel_reserve_satoshis, (chan.context.channel_value_satoshis as f64 * inbound_selected_channel_reserve_perc) as u64);
+			let expected_inbound_selected_chan_reserve = cmp::max(inbound_node_config.channel_handshake_config.min_their_channel_reserve_satoshis, (chan.funding.get_value_satoshis() as f64 * inbound_selected_channel_reserve_perc) as u64);
 
 			assert_eq!(chan_inbound_node.funding.holder_selected_channel_reserve_satoshis, expected_inbound_selected_chan_reserve);
 			assert_eq!(chan_inbound_node.funding.counterparty_selected_channel_reserve_satoshis.unwrap(), expected_outbound_selected_chan_reserve);
@@ -16314,7 +16293,8 @@ mod tests {
 	#[test]
 	#[rustfmt::skip]
 	fn test_configurable_min_channel_reserve() {
-		let fee_est = LowerBoundedFeeEstimator::new(&TestFeeEstimator { fee_est: 15_000 });
+		let inner_fee_est = TestFeeEstimator::new(15_000);
+		let fee_est = LowerBoundedFeeEstimator::new(&inner_fee_est);
 		let logger = test_utils::TestLogger::new();
 		let secp_ctx = Secp256k1::new();
 		let keys_provider = test_utils::TestKeysInterface::new(&[42; 32], Network::Testnet);
@@ -16332,7 +16312,7 @@ mod tests {
 		).unwrap();
 
 		// With 0 minimum and 0 proportional, reserve should be 0 (bypasses dust limit)
-		assert_eq!(chan.context.holder_selected_channel_reserve_satoshis, 0);
+		assert_eq!(chan.funding.holder_selected_channel_reserve_satoshis, 0);
 
 		// Test with custom minimum enforced when proportional is lower
 		config.channel_handshake_config.min_their_channel_reserve_satoshis = 10_000;
@@ -16345,7 +16325,7 @@ mod tests {
 		).unwrap();
 
 		// Proportional would be 1% of 100k = 1000, but minimum is 10000, so 10000 should be used
-		assert_eq!(chan_small.context.holder_selected_channel_reserve_satoshis, 10_000);
+		assert_eq!(chan_small.funding.holder_selected_channel_reserve_satoshis, 10_000);
 
 		// Test that dust limit is still enforced when min_their_channel_reserve_satoshis is non-zero but below dust limit
 		config.channel_handshake_config.min_their_channel_reserve_satoshis = 100; // Below dust limit of 354
