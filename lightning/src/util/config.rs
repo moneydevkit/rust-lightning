@@ -267,6 +267,15 @@ pub struct ChannelHandshakeConfig {
 	///
 	/// [`max_htlcs`]: crate::ln::chan_utils::max_htlcs
 	pub our_max_accepted_htlcs: u16,
+
+	/// If set, counterparty-initiated splices on 0-conf channels will require this many
+	/// confirmations before we send `splice_locked`. This prevents inheriting 0-conf trust
+	/// on funding outputs we didn't construct.
+	///
+	/// Has no effect on self-initiated splices or non-0-conf channels.
+	///
+	/// Default value: `None` (splice inherits the channel's `minimum_depth`)
+	pub splice_minimum_depth: Option<u32>,
 }
 
 impl Default for ChannelHandshakeConfig {
@@ -284,6 +293,7 @@ impl Default for ChannelHandshakeConfig {
 			negotiate_anchors_zero_fee_htlc_tx: false,
 			negotiate_anchor_zero_fee_commitments: false,
 			our_max_accepted_htlcs: 50,
+			splice_minimum_depth: None,
 		}
 	}
 }
@@ -307,6 +317,7 @@ impl Readable for ChannelHandshakeConfig {
 			negotiate_anchors_zero_fee_htlc_tx: Readable::read(reader)?,
 			negotiate_anchor_zero_fee_commitments: Readable::read(reader)?,
 			our_max_accepted_htlcs: Readable::read(reader)?,
+			splice_minimum_depth: Readable::read(reader)?,
 		})
 	}
 }
