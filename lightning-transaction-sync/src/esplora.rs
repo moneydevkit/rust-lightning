@@ -26,6 +26,21 @@ use esplora_client::Builder;
 use core::ops::Deref;
 use std::collections::HashSet;
 
+/// Maximum number of concurrent in-flight Esplora requests issued while syncing
+/// confirmed/unconfirmed transactions (async client only).
+///
+/// The Esplora chain sync re-confirms every watched transaction/output on each
+/// pass, which is one or more HTTP round-trips each. Against a remote Esplora
+/// these run sequentially in the stock client, so sync wall-time scales with
+/// `watched_set * round_trip_latency` and easily exceeds an LDK wallet-sync
+/// timeout on wallets with real channel history. We fan these out with a bounded
+/// concurrency instead. The bound is deliberately small: when many nodes sync
+/// against a shared, rate-limited endpoint the effective request rate is the
+/// fleet aggregate, so a low per-node concurrency keeps us under the server's
+/// per-client limit while still removing the strictly-serial latency floor.
+#[cfg(feature = "async-interface")]
+const ESPLORA_SYNC_CONCURRENCY: usize = 4;
+
 /// Synchronizes LDK with a given [`Esplora`] server.
 ///
 /// Needs to be registered with a [`ChainMonitor`] via the [`Filter`] interface to be informed of
@@ -298,19 +313,109 @@ where
 
 		let mut confirmed_txs: Vec<ConfirmedTx> = Vec::new();
 
+		// Phase A: resolve the confirmation status of each directly-watched
+		// transaction. `watched_transactions` is a set (unique txids), so a tx
+		// resolved here is never a duplicate; the async path fans the lookups
+		// out with bounded concurrency and merges the results.
+		#[cfg(feature = "async-interface")]
+		{
+			use futures::stream::{self, StreamExt};
+			let results: Vec<Result<Option<ConfirmedTx>, InternalError>> =
+				stream::iter(sync_state.watched_transactions.iter().copied())
+					.map(|txid| async move { self.get_confirmed_tx(txid, None, None).await })
+					.buffer_unordered(ESPLORA_SYNC_CONCURRENCY)
+					.collect()
+					.await;
+			for r in results {
+				if let Some(confirmed_tx) = r? {
+					if !confirmed_txs.iter().any(|ctx| ctx.txid == confirmed_tx.txid) {
+						confirmed_txs.push(confirmed_tx);
+					}
+				}
+			}
+		}
+		#[cfg(not(feature = "async-interface"))]
 		for txid in &sync_state.watched_transactions {
 			if confirmed_txs.iter().any(|ctx| ctx.txid == *txid) {
 				continue;
 			}
-			if let Some(confirmed_tx) = maybe_await!(self.get_confirmed_tx(*txid, None, None))? {
+			if let Some(confirmed_tx) = self.get_confirmed_tx(*txid, None, None)? {
 				confirmed_txs.push(confirmed_tx);
 			}
 		}
 
+		// Phase B: for each watched output, fetch its spend status and, if it was
+		// spent, resolve the spending transaction. Phase A is fully merged into
+		// `confirmed_txs` before this runs, so the consistency check below sees
+		// the same state the sequential version did.
+		#[cfg(feature = "async-interface")]
+		{
+			use futures::stream::{self, StreamExt};
+
+			// B1: fan out the output-status lookups.
+			let outpoints: Vec<_> =
+				sync_state.watched_outputs.values().map(|o| o.outpoint).collect();
+			let status_results: Vec<Result<Option<esplora_client::OutputStatus>, InternalError>> =
+				stream::iter(outpoints.into_iter())
+					.map(|outpoint| async move {
+						self.client
+							.get_output_status(&outpoint.txid, outpoint.index as u64)
+							.await
+							.map_err(InternalError::from)
+					})
+					.buffer_unordered(ESPLORA_SYNC_CONCURRENCY)
+					.collect()
+					.await;
+
+			// B2: post-process sequentially, preserving every consistency check
+			// the sequential version performed, and build the to-fetch list.
+			let mut to_fetch: Vec<(Txid, Option<BlockHash>, Option<u32>)> = Vec::new();
+			for status_res in status_results {
+				let output_status = match status_res? {
+					Some(s) => s,
+					None => continue,
+				};
+				if let Some(spending_txid) = output_status.txid {
+					if let Some(spending_tx_status) = output_status.status {
+						if confirmed_txs.iter().any(|ctx| ctx.txid == spending_txid) {
+							if spending_tx_status.confirmed {
+								continue;
+							} else {
+								log_trace!(self.logger, "Inconsistency: Detected previously-confirmed Tx {} as unconfirmed", spending_txid);
+								return Err(InternalError::Inconsistency);
+							}
+						}
+						to_fetch.push((
+							spending_txid,
+							spending_tx_status.block_hash,
+							spending_tx_status.block_height,
+						));
+					}
+				}
+			}
+
+			// B3: fan out the dependent confirmed-tx lookups.
+			let dep_results: Vec<Result<Option<ConfirmedTx>, InternalError>> =
+				stream::iter(to_fetch.into_iter())
+					.map(|(txid, bh, height)| async move {
+						self.get_confirmed_tx(txid, bh, height).await
+					})
+					.buffer_unordered(ESPLORA_SYNC_CONCURRENCY)
+					.collect()
+					.await;
+			for r in dep_results {
+				if let Some(confirmed_tx) = r? {
+					if !confirmed_txs.iter().any(|ctx| ctx.txid == confirmed_tx.txid) {
+						confirmed_txs.push(confirmed_tx);
+					}
+				}
+			}
+		}
+		#[cfg(not(feature = "async-interface"))]
 		for (_, output) in &sync_state.watched_outputs {
-			if let Some(output_status) = maybe_await!(self
+			if let Some(output_status) = self
 				.client
-				.get_output_status(&output.outpoint.txid, output.outpoint.index as u64))?
+				.get_output_status(&output.outpoint.txid, output.outpoint.index as u64)?
 			{
 				if let Some(spending_txid) = output_status.txid {
 					if let Some(spending_tx_status) = output_status.status {
@@ -324,11 +429,11 @@ where
 							}
 						}
 
-						if let Some(confirmed_tx) = maybe_await!(self.get_confirmed_tx(
+						if let Some(confirmed_tx) = self.get_confirmed_tx(
 							spending_txid,
 							spending_tx_status.block_hash,
 							spending_tx_status.block_height,
-						))? {
+						)? {
 							confirmed_txs.push(confirmed_tx);
 						}
 					}
@@ -436,9 +541,48 @@ where
 
 		let mut unconfirmed_txs = Vec::new();
 
+		// The async path fans the per-block status checks out with bounded
+		// concurrency. The `None` block hash is a hard invariant violation
+		// (pre-0.0.113 channel), so we screen for it before fanning out rather
+		// than panicking from inside a concurrent task.
+		#[cfg(feature = "async-interface")]
+		{
+			use futures::stream::{self, StreamExt};
+			let mut items: Vec<(Txid, BlockHash)> = Vec::with_capacity(relevant_txids.len());
+			for (txid, _conf_height, block_hash_opt) in relevant_txids {
+				if let Some(block_hash) = block_hash_opt {
+					items.push((txid, block_hash));
+				} else {
+					log_error!(self.logger, "Untracked confirmation of funding transaction. Please ensure none of your channels had been created with LDK prior to version 0.0.113!");
+					panic!("Untracked confirmation of funding transaction. Please ensure none of your channels had been created with LDK prior to version 0.0.113!");
+				}
+			}
+			let results: Vec<(Txid, Result<esplora_client::BlockStatus, InternalError>)> =
+				stream::iter(items.into_iter())
+					.map(|(txid, block_hash)| async move {
+						let r = self
+							.client
+							.get_block_status(&block_hash)
+							.await
+							.map_err(InternalError::from);
+						(txid, r)
+					})
+					.buffer_unordered(ESPLORA_SYNC_CONCURRENCY)
+					.collect()
+					.await;
+			for (txid, status_res) in results {
+				let block_status = status_res?;
+				if block_status.in_best_chain {
+					// Skip if the block in question is still confirmed.
+					continue;
+				}
+				unconfirmed_txs.push(txid);
+			}
+		}
+		#[cfg(not(feature = "async-interface"))]
 		for (txid, _conf_height, block_hash_opt) in relevant_txids {
 			if let Some(block_hash) = block_hash_opt {
-				let block_status = maybe_await!(self.client.get_block_status(&block_hash))?;
+				let block_status = self.client.get_block_status(&block_hash)?;
 				if block_status.in_best_chain {
 					// Skip if the block in question is still confirmed.
 					continue;
