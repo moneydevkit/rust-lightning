@@ -19,6 +19,7 @@ use std::ops::Deref;
 use crate::sync::RwLock;
 
 
+use crate::lsps4::fee_policy::{FeePolicy, FeeTier};
 use crate::lsps4::utils;
 
 /// The Intercepted HTLC store information will be persisted under this key.
@@ -31,6 +32,7 @@ pub(crate) const INTERCEPT_SCID_STORE_PERSISTENCE_SECONDARY_NAMESPACE: &str = ""
 pub struct ScidWithPeer {
 	scid: u64,
 	peer_id: PublicKey,
+	policy: FeePolicy,
 }
 
 impl ScidWithPeer {
@@ -40,6 +42,7 @@ impl ScidWithPeer {
 		Self {
 			scid,
 			peer_id,
+			policy: FeePolicy::Flat(FeeTier::Standard),
 		}
 	}
 
@@ -54,11 +57,16 @@ impl ScidWithPeer {
 	pub fn peer_id(&self) -> PublicKey {
 		self.peer_id
 	}
+
+	pub fn policy(&self) -> &FeePolicy {
+		&self.policy
+	}
 }
 
 impl_writeable_tlv_based!(ScidWithPeer, {
 	(0, scid, required),
 	(2, peer_id, required),
+	(4, policy, (default_value, FeePolicy::Flat(FeeTier::Standard))),
 });
 
 pub struct ScidStore<L: Deref, KV: Deref + Clone>
@@ -203,5 +211,52 @@ where L::Target: Logger, KV::Target: KVStoreSync {
 			result
 		);
 		result
+	}
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+	use lightning::impl_writeable_tlv_based;
+
+	/// A copy of the pre-policy `ScidWithPeer` layout (tlv 0/2 only) used to prove that records
+	/// persisted before the `policy` field existed still decode, defaulting to `Flat(Standard)`.
+	struct LegacyScidWithPeer {
+		scid: u64,
+		peer_id: PublicKey,
+	}
+
+	impl_writeable_tlv_based!(LegacyScidWithPeer, {
+		(0, scid, required),
+		(2, peer_id, required),
+	});
+
+	fn test_peer() -> PublicKey {
+		// The secp256k1 generator point: a valid compressed public key.
+		PublicKey::from_slice(&[
+			0x02, 0x79, 0xBE, 0x66, 0x7E, 0xF9, 0xDC, 0xBB, 0xAC, 0x55, 0xA0, 0x62, 0x95, 0xCE,
+			0x87, 0x0B, 0x07, 0x02, 0x9B, 0xFC, 0xDB, 0x2D, 0xCE, 0x28, 0xD9, 0x59, 0xF2, 0x81,
+			0x5B, 0x16, 0xF8, 0x17, 0x98,
+		])
+		.unwrap()
+	}
+
+	#[test]
+	fn round_trips_with_policy() {
+		let record = ScidWithPeer::new(42, test_peer());
+		let bytes = record.encode();
+		let decoded = ScidWithPeer::read(&mut &bytes[..]).unwrap();
+		assert_eq!(record, decoded);
+		assert_eq!(decoded.policy(), &FeePolicy::Flat(FeeTier::Standard));
+	}
+
+	#[test]
+	fn legacy_record_defaults_to_standard_policy() {
+		let legacy = LegacyScidWithPeer { scid: 42, peer_id: test_peer() };
+		let bytes = legacy.encode();
+		let decoded = ScidWithPeer::read(&mut &bytes[..]).unwrap();
+		assert_eq!(decoded.scid(), 42);
+		assert_eq!(decoded.peer_id(), test_peer());
+		assert_eq!(decoded.policy(), &FeePolicy::Flat(FeeTier::Standard));
 	}
 }
