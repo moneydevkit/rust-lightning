@@ -60,9 +60,10 @@ impl_writeable_tlv_based_enum!(FeePolicy,
 ///
 /// `standard_ppm` is the LSP's configured proportional rate, used only by [`FeeTier::Standard`].
 ///
-/// The skim is waived in exactly one case: when it would consume the entire HTLC. A zero-value
-/// forward is rejected by the channel (`channel.rs` force-closes on a 0-msat `update_add_htlc`),
-/// so skimming the whole amount would break the forward; that is the only reason we ever waive.
+/// The skim is zero in two distinct cases. [`FeeTier::ZeroFee`] never skims, by design. Any other
+/// tier is additionally forced to zero when its fee would consume the entire HTLC: a zero-value
+/// forward is rejected by the channel (`channel.rs` force-closes on a 0-msat `update_add_htlc`), so
+/// skimming the whole amount would break the forward; dropping to zero forwards it intact instead.
 /// The proportional component is computed in 128-bit precision, so a very large HTLC is skimmed
 /// correctly rather than (as the previous `u64` arithmetic did) overflowing and forwarding the
 /// whole amount for free.
