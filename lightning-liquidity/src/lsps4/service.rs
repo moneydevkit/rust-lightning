@@ -17,8 +17,8 @@ use crate::lsps0::ser::{
 };
 use crate::lsps4::event::LSPS4ServiceEvent;
 use crate::lsps4::htlc_store::{HTLCStore, InterceptedHtlc};
+use crate::lsps4::fee_policy::{resolve_skim, FeePolicy, FeeTier};
 use crate::lsps4::scid_store::ScidStore;
-use crate::lsps4::utils::compute_forward_fee;
 use crate::message_queue::MessageQueue;
 use crate::prelude::hash_map::Entry;
 use crate::prelude::{new_hash_map, HashMap};
@@ -424,33 +424,24 @@ where
 				}
 
 				let htlc_id = htlc.id();
-				let mut fee_msat = match crate::lsps4::utils::compute_forward_fee(
+				let skimmed_fee_msat = resolve_skim(
+					&FeePolicy::Flat(FeeTier::Standard),
 					expected_outbound_msat,
 					self.config.forwarding_fee_proportional_millionths,
-				) {
-					Some(fee) => core::cmp::min(fee, expected_outbound_msat),
-					None => {
-						log_error!(
-						self.logger,
-						"Overflow while computing skimmed fee for intercepted HTLC {:?}. Skipping skim.",
-						htlc_id
-					);
-						0
-					},
-				};
-
-				let mut amount_to_forward_msat = expected_outbound_msat.saturating_sub(fee_msat);
-				if amount_to_forward_msat == 0 && fee_msat > 0 {
+				);
+				if skimmed_fee_msat == 0 {
+					// The policy here is always Flat(Standard), so a zero skim can only mean the
+					// fee would have consumed the entire HTLC; it is never a ZeroFee waiver yet.
 					log_error!(
 						self.logger,
-						"Skimmed fee equaled the entire HTLC amount for {:?}. Skipping skim.",
+						"Standard skim would have consumed the entire HTLC {:?}; forwarding the full amount.",
 						htlc_id
 					);
-					fee_msat = 0;
-					amount_to_forward_msat = expected_outbound_msat;
 				}
 
-				ComputedHtlc { htlc, amount_to_forward_msat, skimmed_fee_msat: fee_msat }
+				let amount_to_forward_msat = expected_outbound_msat.saturating_sub(skimmed_fee_msat);
+
+				ComputedHtlc { htlc, amount_to_forward_msat, skimmed_fee_msat }
 			})
 			.collect();
 
