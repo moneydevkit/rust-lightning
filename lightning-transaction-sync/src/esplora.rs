@@ -369,29 +369,34 @@ where
 
 			// B2: post-process sequentially, preserving every consistency check
 			// the sequential version performed, and build the to-fetch list.
+			let phase_a_txids: HashSet<Txid> =
+				confirmed_txs.iter().map(|ctx| ctx.txid).collect();
 			let mut to_fetch: Vec<(Txid, Option<BlockHash>, Option<u32>)> = Vec::new();
-			for status_res in status_results {
-				let output_status = match status_res? {
-					Some(s) => s,
-					None => continue,
+			// `transpose` drops outputs with no status while still surfacing any
+			// lookup error through the `?` below.
+			for status_res in status_results.into_iter().filter_map(Result::transpose) {
+				let output_status = status_res?;
+				let (Some(spending_txid), Some(spending_tx_status)) =
+					(output_status.txid, output_status.status)
+				else {
+					continue;
 				};
-				if let Some(spending_txid) = output_status.txid {
-					if let Some(spending_tx_status) = output_status.status {
-						if confirmed_txs.iter().any(|ctx| ctx.txid == spending_txid) {
-							if spending_tx_status.confirmed {
-								continue;
-							} else {
-								log_trace!(self.logger, "Inconsistency: Detected previously-confirmed Tx {} as unconfirmed", spending_txid);
-								return Err(InternalError::Inconsistency);
-							}
-						}
-						to_fetch.push((
-							spending_txid,
-							spending_tx_status.block_hash,
-							spending_tx_status.block_height,
-						));
+
+				if phase_a_txids.contains(&spending_txid) {
+					// Phase A already resolved this spend as confirmed; the server
+					// flipping it back to unconfirmed is an inconsistency.
+					if !spending_tx_status.confirmed {
+						log_trace!(self.logger, "Inconsistency: Detected previously-confirmed Tx {} as unconfirmed", spending_txid);
+						return Err(InternalError::Inconsistency);
 					}
+					continue;
 				}
+
+				to_fetch.push((
+					spending_txid,
+					spending_tx_status.block_hash,
+					spending_tx_status.block_height,
+				));
 			}
 
 			// B3: fan out the dependent confirmed-tx lookups.
