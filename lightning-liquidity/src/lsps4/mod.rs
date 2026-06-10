@@ -9,6 +9,7 @@
 
 //! Implementation of LSPS4: JIT Channel Negotiation specification.
 
+pub(crate) mod claim;
 pub mod client;
 pub mod event;
 pub mod fee_policy;
