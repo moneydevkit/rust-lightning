@@ -184,13 +184,6 @@ where L::Target: Logger, KV::Target: KVStoreSync {
 		Ok(())
 	}
 
-	pub fn add_intercepted_scid(
-		&self, scid: u64, peer_id: PublicKey,
-	) -> Result<bool, io::Error> {
-		let scid = ScidWithPeer::new(scid, peer_id, FeePolicy::Flat(FeeTier::Standard));
-		self.insert(scid)
-	}
-
 	pub fn get_peer(&self, scid: u64) -> Option<PublicKey> {
 		use lightning::log_debug;
 		let result = self.peer_by_scid.read().unwrap().get(&scid).cloned();
@@ -307,7 +300,7 @@ mod tests {
 	#[test]
 	fn default_record_resolves_to_standard_policy() {
 		let store = test_store();
-		store.add_intercepted_scid(42, test_peer()).unwrap();
+		store.insert(ScidWithPeer::new(42, test_peer(), FeePolicy::Flat(FeeTier::Standard))).unwrap();
 
 		assert_eq!(store.get_policy(&test_peer()), Some(FeePolicy::Flat(FeeTier::Standard)));
 	}
