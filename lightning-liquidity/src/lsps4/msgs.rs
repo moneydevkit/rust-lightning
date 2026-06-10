@@ -22,7 +22,13 @@ pub(crate) const LSPS4_REGISTER_NODE_METHOD_NAME: &str = "lsps4.register_node";
 
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
 /// A request made to an LSP to register a node.
-pub struct RegisterNodeRequest {}
+pub struct RegisterNodeRequest {
+	/// An optional signed claim, lowercase-hex encoded, granting this node a
+	/// non-standard fee policy. Absent or unverifiable claims leave the node on
+	/// the standard policy.
+	#[serde(default, skip_serializing_if = "Option::is_none")]
+	pub fee_claim: Option<String>,
+}
 
 /// A newtype that holds a `short_channel_id` in human readable format of BBBxTTTx000.
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
@@ -94,5 +100,34 @@ impl TryFrom<LSPSMessage> for LSPS4Message {
 impl From<LSPS4Message> for LSPSMessage {
 	fn from(message: LSPS4Message) -> Self {
 		LSPSMessage::LSPS4(message)
+	}
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+	use crate::alloc::string::ToString;
+
+	#[test]
+	fn register_node_request_with_claim_round_trips() {
+		let request = RegisterNodeRequest { fee_claim: Some("deadbeef".to_string()) };
+		let json_str = r#"{"fee_claim":"deadbeef"}"#;
+
+		assert_eq!(json_str, serde_json::json!(request).to_string());
+		assert_eq!(request, serde_json::from_str(json_str).unwrap());
+	}
+
+	#[test]
+	fn register_node_request_without_claim_omits_field() {
+		let request = RegisterNodeRequest { fee_claim: None };
+
+		assert_eq!("{}", serde_json::json!(request).to_string());
+	}
+
+	#[test]
+	fn legacy_empty_object_decodes_to_no_claim() {
+		let request: RegisterNodeRequest = serde_json::from_str("{}").unwrap();
+
+		assert_eq!(request, RegisterNodeRequest { fee_claim: None });
 	}
 }
