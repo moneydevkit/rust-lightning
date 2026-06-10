@@ -782,6 +782,14 @@ where
 			skimmed_fee_msat: u64,
 		}
 
+		// The peer's granted policy, looked up once. Peers with no grant resolve to Standard, so
+		// the skim matches the historical 2% for everyone the issuer set hasn't waived.
+		let policy = self
+			.scid_store
+			.get_policy(&their_node_id)
+			.unwrap_or(FeePolicy::Flat(FeeTier::Standard));
+		let is_zero_fee = matches!(policy, FeePolicy::Flat(FeeTier::ZeroFee));
+
 		let mut computed_htlcs: Vec<ComputedHtlc> = htlcs
 			.drain(..)
 			.map(|htlc| {
@@ -792,18 +800,26 @@ where
 
 				let htlc_id = htlc.id();
 				let skimmed_fee_msat = resolve_skim(
-					&FeePolicy::Flat(FeeTier::Standard),
+					&policy,
 					expected_outbound_msat,
 					self.config.forwarding_fee_proportional_millionths,
 				);
 				if skimmed_fee_msat == 0 {
-					// The policy here is always Flat(Standard), so a zero skim can only mean the
-					// fee would have consumed the entire HTLC; it is never a ZeroFee waiver yet.
-					log_error!(
-						self.logger,
-						"Standard skim would have consumed the entire HTLC {:?}; forwarding the full amount.",
-						htlc_id
-					);
+					if is_zero_fee {
+						log_info!(
+							self.logger,
+							"Zero-fee policy for HTLC {:?}; forwarding the full amount.",
+							htlc_id
+						);
+					} else {
+						// A non-zero-fee tier skimmed nothing only because the fee would have
+						// consumed the entire HTLC; forward it intact rather than break it.
+						log_error!(
+							self.logger,
+							"Skim would have consumed the entire HTLC {:?}; forwarding the full amount.",
+							htlc_id
+						);
+					}
 				}
 
 				let amount_to_forward_msat = expected_outbound_msat.saturating_sub(skimmed_fee_msat);
