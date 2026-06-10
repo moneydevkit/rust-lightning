@@ -109,7 +109,7 @@ where
 			}
 		}
 
-		let request = LSPS4Request::RegisterNode(RegisterNodeRequest {});
+		let request = LSPS4Request::RegisterNode(RegisterNodeRequest { fee_claim: None });
 		let msg = LSPS4Message::Request(request_id.clone(), request).into();
 		let mut message_queue_notifier = self.pending_messages.notifier();
 		message_queue_notifier.enqueue(&counterparty_node_id, msg);
