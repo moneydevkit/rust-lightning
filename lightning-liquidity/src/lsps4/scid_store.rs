@@ -37,13 +37,9 @@ pub struct ScidWithPeer {
 
 impl ScidWithPeer {
 	pub fn new(
-		scid: u64, peer_id: PublicKey,
+		scid: u64, peer_id: PublicKey, policy: FeePolicy,
 	) -> Self {
-		Self {
-			scid,
-			peer_id,
-			policy: FeePolicy::Flat(FeeTier::Standard),
-		}
+		Self { scid, peer_id, policy }
 	}
 
 	pub fn store_key(&self) -> String {
@@ -73,6 +69,7 @@ pub struct ScidStore<L: Deref, KV: Deref + Clone>
 where L::Target: Logger, KV::Target: KVStoreSync {
 	peer_by_scid: RwLock<HashMap<u64, PublicKey>>,
 	scid_by_peer: RwLock<HashMap<PublicKey, u64>>,
+	policy_by_peer: RwLock<HashMap<PublicKey, FeePolicy>>,
 	kv_store: KV,
 	logger: L
 }
@@ -112,7 +109,11 @@ where L::Target: Logger, KV::Target: KVStoreSync {
 		let scid_by_peer =
 			RwLock::new(HashMap::from_iter(scids.iter().map(|obj| (obj.peer_id(), obj.scid()))));
 
-		Ok(Self { peer_by_scid, scid_by_peer, kv_store, logger })
+		let policy_by_peer = RwLock::new(HashMap::from_iter(
+			scids.iter().map(|obj| (obj.peer_id(), obj.policy().clone())),
+		));
+
+		Ok(Self { peer_by_scid, scid_by_peer, policy_by_peer, kv_store, logger })
 	}
 
 	pub(crate) fn insert(&self, scid: ScidWithPeer) -> Result<bool, io::Error> {
@@ -125,8 +126,10 @@ where L::Target: Logger, KV::Target: KVStoreSync {
 		// Then insert into the maps
 		let mut locked_peer_by_scid = self.peer_by_scid.write().unwrap();
 		let mut locked_scid_by_peer = self.scid_by_peer.write().unwrap();
+		let mut locked_policy_by_peer = self.policy_by_peer.write().unwrap();
 		let updated = locked_peer_by_scid.insert(scid.scid(), scid.peer_id().clone()).is_some();
 		locked_scid_by_peer.insert(scid.peer_id().clone(), scid.scid());
+		locked_policy_by_peer.insert(scid.peer_id().clone(), scid.policy().clone());
 
 		log_info!(
 			self.logger,
@@ -142,10 +145,12 @@ where L::Target: Logger, KV::Target: KVStoreSync {
 	pub(crate) fn remove(&self, scid: u64) -> Result<(), io::Error> {
 		let mut locked_peer_by_scid = self.peer_by_scid.write().unwrap();
 		let mut locked_scid_by_peer = self.scid_by_peer.write().unwrap();
+		let mut locked_policy_by_peer = self.policy_by_peer.write().unwrap();
 
 		let removed = locked_peer_by_scid.remove(&scid);
 		if let Some(peer_id) = removed {
 			locked_scid_by_peer.remove(&peer_id);
+			locked_policy_by_peer.remove(&peer_id);
 			let store_key = utils::to_string(&scid.to_be_bytes());
 			self.kv_store
 				.remove(INTERCEPT_SCID_STORE_PERSISTENCE_PRIMARY_NAMESPACE, INTERCEPT_SCID_STORE_PERSISTENCE_SECONDARY_NAMESPACE, &store_key, false)
@@ -179,16 +184,6 @@ where L::Target: Logger, KV::Target: KVStoreSync {
 		Ok(())
 	}
 
-	pub fn add_intercepted_scid(
-		&self, scid: u64, peer_id: PublicKey,
-	) -> Result<bool, io::Error> {
-		let scid = ScidWithPeer::new(
-			scid,
-			peer_id,
-		);
-		self.insert(scid)
-	}
-
 	pub fn get_peer(&self, scid: u64) -> Option<PublicKey> {
 		use lightning::log_debug;
 		let result = self.peer_by_scid.read().unwrap().get(&scid).cloned();
@@ -211,6 +206,10 @@ where L::Target: Logger, KV::Target: KVStoreSync {
 			result
 		);
 		result
+	}
+
+	pub fn get_policy(&self, peer_id: &PublicKey) -> Option<FeePolicy> {
+		self.policy_by_peer.read().unwrap().get(peer_id).cloned()
 	}
 }
 
@@ -243,11 +242,11 @@ mod tests {
 
 	#[test]
 	fn round_trips_with_policy() {
-		let record = ScidWithPeer::new(42, test_peer());
+		let record = ScidWithPeer::new(42, test_peer(), FeePolicy::Flat(FeeTier::ZeroFee));
 		let bytes = record.encode();
 		let decoded = ScidWithPeer::read(&mut &bytes[..]).unwrap();
 		assert_eq!(record, decoded);
-		assert_eq!(decoded.policy(), &FeePolicy::Flat(FeeTier::Standard));
+		assert_eq!(decoded.policy(), &FeePolicy::Flat(FeeTier::ZeroFee));
 	}
 
 	#[test]
@@ -258,5 +257,51 @@ mod tests {
 		assert_eq!(decoded.scid(), 42);
 		assert_eq!(decoded.peer_id(), test_peer());
 		assert_eq!(decoded.policy(), &FeePolicy::Flat(FeeTier::Standard));
+	}
+
+	use bitcoin::secp256k1::{Secp256k1, SecretKey};
+	use lightning::util::test_utils::{TestLogger, TestStore};
+	use std::sync::Arc;
+
+	fn other_peer() -> PublicKey {
+		PublicKey::from_secret_key(&Secp256k1::new(), &SecretKey::from_slice(&[0x24; 32]).unwrap())
+	}
+
+	fn test_store() -> ScidStore<Arc<TestLogger>, Arc<TestStore>> {
+		ScidStore::new(Arc::new(TestStore::new(false)), Arc::new(TestLogger::new())).unwrap()
+	}
+
+	#[test]
+	fn insert_with_policy_then_get_policy_returns_it() {
+		let store = test_store();
+		store
+			.insert(ScidWithPeer::new(42, test_peer(), FeePolicy::Flat(FeeTier::ZeroFee)))
+			.unwrap();
+
+		assert_eq!(store.get_policy(&test_peer()), Some(FeePolicy::Flat(FeeTier::ZeroFee)));
+		assert_eq!(store.get_policy(&other_peer()), None);
+	}
+
+	#[test]
+	fn load_rebuilds_policy_map() {
+		let kv_store = Arc::new(TestStore::new(false));
+		{
+			let store =
+				ScidStore::new(kv_store.clone(), Arc::new(TestLogger::new())).unwrap();
+			store
+				.insert(ScidWithPeer::new(42, test_peer(), FeePolicy::Flat(FeeTier::ZeroFee)))
+				.unwrap();
+		}
+
+		let reloaded = ScidStore::new(kv_store, Arc::new(TestLogger::new())).unwrap();
+		assert_eq!(reloaded.get_policy(&test_peer()), Some(FeePolicy::Flat(FeeTier::ZeroFee)));
+	}
+
+	#[test]
+	fn default_record_resolves_to_standard_policy() {
+		let store = test_store();
+		store.insert(ScidWithPeer::new(42, test_peer(), FeePolicy::Flat(FeeTier::Standard))).unwrap();
+
+		assert_eq!(store.get_policy(&test_peer()), Some(FeePolicy::Flat(FeeTier::Standard)));
 	}
 }
