@@ -84,11 +84,15 @@ where
 
 	/// Requests the LSP to register the node.
 	///
+	/// `fee_claim` is an optional lowercase-hex signed grant for a non-standard fee policy; the LSP
+	/// verifies it against its configured issuer keys. `None` (or an unverifiable claim) leaves the
+	/// node on the standard policy.
+	///
 	/// The user will receive the LSP's response via an [`InvoiceParametersReady`] event.
 	///
 	/// [`InvoiceParametersReady`]: crate::lsps4::event::LSPS4ClientEvent::InvoiceParametersReady
 	pub fn register_node(
-		&self, counterparty_node_id: PublicKey
+		&self, counterparty_node_id: PublicKey, fee_claim: Option<String>,
 	) -> Result<LSPSRequestId, APIError> {
 		let fn_start = Instant::now();
 		eprintln!("TIMING: [LSPS4 Client] register_node START for peer {}", counterparty_node_id);
@@ -115,7 +119,7 @@ where
 			}
 		}
 
-		let request = LSPS4Request::RegisterNode(RegisterNodeRequest { fee_claim: None });
+		let request = LSPS4Request::RegisterNode(RegisterNodeRequest { fee_claim });
 		let msg = LSPS4Message::Request(request_id.clone(), request).into();
 		let mut message_queue_notifier = self.pending_messages.notifier();
 		message_queue_notifier.enqueue(&counterparty_node_id, msg);
@@ -210,4 +214,72 @@ where
 }
 
 #[cfg(test)]
-mod tests {}
+mod tests {
+	use super::*;
+	use crate::lsps0::ser::LSPSMessage;
+	use bitcoin::secp256k1::{Secp256k1, SecretKey};
+	use core::sync::atomic::{AtomicU64, Ordering};
+	use lightning::util::persist::KVStoreSyncWrapper;
+	use lightning::util::test_utils::TestStore;
+	use lightning::util::wakers::Notifier;
+	use std::collections::VecDeque;
+
+	struct CountingEntropy {
+		counter: AtomicU64,
+	}
+
+	impl EntropySource for CountingEntropy {
+		fn get_secure_random_bytes(&self) -> [u8; 32] {
+			let counter = self.counter.fetch_add(1, Ordering::SeqCst);
+			let mut bytes = [0u8; 32];
+			bytes[0..8].copy_from_slice(&counter.to_be_bytes());
+			bytes
+		}
+	}
+
+	type TestKVStore = Arc<KVStoreSyncWrapper<Arc<TestStore>>>;
+
+	fn setup() -> (LSPS4ClientHandler<Arc<CountingEntropy>, TestKVStore>, Arc<MessageQueue>, PublicKey)
+	{
+		let entropy = Arc::new(CountingEntropy { counter: AtomicU64::new(1) });
+		let message_queue = Arc::new(MessageQueue::new(Arc::new(Notifier::new())));
+		let kv_store = Arc::new(KVStoreSyncWrapper(Arc::new(TestStore::new(false))));
+		let event_queue =
+			Arc::new(EventQueue::new(VecDeque::new(), kv_store, Arc::new(Notifier::new())));
+		let client = LSPS4ClientHandler::new(
+			entropy,
+			Arc::clone(&message_queue),
+			event_queue,
+			LSPS4ClientConfig::default(),
+		);
+		let peer = PublicKey::from_secret_key(&Secp256k1::new(), &SecretKey::from_slice(&[42u8; 32]).unwrap());
+		(client, message_queue, peer)
+	}
+
+	/// The single enqueued message must be a `register_node` request; returns its `fee_claim`.
+	fn sole_request_fee_claim(message_queue: &MessageQueue) -> Option<String> {
+		let mut pending = message_queue.get_and_clear_pending_msgs();
+		assert_eq!(pending.len(), 1);
+		match pending.pop().unwrap().1 {
+			LSPSMessage::LSPS4(LSPS4Message::Request(_, LSPS4Request::RegisterNode(req))) => {
+				req.fee_claim
+			},
+			other => panic!("expected a register_node request, got {:?}", other),
+		}
+	}
+
+	#[test]
+	fn register_node_carries_the_claim() {
+		let (client, message_queue, peer) = setup();
+		let claim = "deadbeef".to_string();
+		client.register_node(peer, Some(claim.clone())).unwrap();
+		assert_eq!(sole_request_fee_claim(&message_queue), Some(claim));
+	}
+
+	#[test]
+	fn register_node_without_a_claim_omits_it() {
+		let (client, message_queue, peer) = setup();
+		client.register_node(peer, None).unwrap();
+		assert_eq!(sole_request_fee_claim(&message_queue), None);
+	}
+}
