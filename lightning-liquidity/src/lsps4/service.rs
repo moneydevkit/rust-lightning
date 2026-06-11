@@ -15,10 +15,11 @@ use crate::lsps0::ser::{
 	JSONRPC_INTERNAL_ERROR_ERROR_CODE, JSONRPC_INTERNAL_ERROR_ERROR_MESSAGE,
 	LSPS0_CLIENT_REJECTED_ERROR_CODE,
 };
+use crate::lsps4::claim::verify_claim;
 use crate::lsps4::event::LSPS4ServiceEvent;
 use crate::lsps4::htlc_store::{HTLCStore, InterceptedHtlc};
-use crate::lsps4::scid_store::ScidStore;
-use crate::lsps4::utils::compute_forward_fee;
+use crate::lsps4::fee_policy::{resolve_skim, FeePolicy, FeeTier};
+use crate::lsps4::scid_store::{ScidStore, ScidWithPeer};
 use crate::message_queue::MessageQueue;
 use crate::prelude::hash_map::Entry;
 use crate::prelude::{new_hash_map, HashMap};
@@ -34,7 +35,7 @@ use lightning::util::logger::{Level, Logger};
 use lightning::util::persist::{KVStore, KVStoreSync};
 use lightning_types::payment::PaymentHash;
 
-use bitcoin::secp256k1::PublicKey;
+use bitcoin::secp256k1::{PublicKey, Secp256k1, VerifyOnly, XOnlyPublicKey};
 
 use core::ops::Deref;
 use core::sync::atomic::{AtomicUsize, Ordering};
@@ -89,6 +90,10 @@ pub struct LSPS4ServiceConfig {
 	pub cltv_expiry_delta: u32,
 	/// The proportional fee, in millionths, to skim from forwarded payments.
 	pub forwarding_fee_proportional_millionths: u64,
+	/// Issuer keys trusted to sign fee-policy grants. Empty disables the feature: every claim is
+	/// rejected and every peer resolves to the standard policy. A claim signed by any one of these
+	/// keys is honoured.
+	pub issuer_pubkeys: Vec<XOnlyPublicKey>,
 }
 
 /// The main object allowing to send and receive LSPS4 messages.
@@ -106,6 +111,8 @@ where
 	htlc_store: HTLCStore<L, K>,
 	connected_peers: RwLock<HashSet<PublicKey>>,
 	config: LSPS4ServiceConfig,
+	/// Long-lived context for verifying fee-claim signatures during registration.
+	secp_ctx: Secp256k1<VerifyOnly>,
 }
 
 impl<CM: Deref + Clone, K: Deref + Clone, L: Deref + Clone> LSPS4ServiceHandler<CM, K, L>
@@ -132,6 +139,7 @@ where
 			config,
 			logger,
 			connected_peers: RwLock::new(HashSet::new()),
+			secp_ctx: Secp256k1::verification_only(),
 		})
 	}
 
@@ -305,8 +313,56 @@ where
 		self.connected_peers.write().unwrap().remove(counterparty_node_id);
 	}
 
+	/// Resolve any fee-policy grant the registering node presented.
+	///
+	/// Returns `None` when the feature is off (no issuer keys configured), when no claim was
+	/// presented, or when the claim does not verify. A `None` must never downgrade a live grant, so
+	/// the caller only upserts on `Some`; a new record falls back to the standard policy.
+	fn resolve_claim_policy(
+		&self, counterparty: &PublicKey, fee_claim: &Option<String>,
+	) -> Option<FeePolicy> {
+		if self.config.issuer_pubkeys.is_empty() {
+			return None;
+		}
+		let fee_claim = fee_claim.as_ref()?;
+		match verify_claim(&self.secp_ctx, fee_claim, &self.config.issuer_pubkeys, counterparty) {
+			Ok(policy) => Some(policy),
+			Err(e) => {
+				log_error!(
+					self.logger,
+					"[LSPS4] Rejected fee claim from {}: {:?}",
+					counterparty,
+					e
+				);
+				None
+			},
+		}
+	}
+
+	/// Persist (upsert) a SCID record carrying the resolved fee policy for a peer.
+	fn persist_scid_policy(
+		&self, intercept_scid: u64, peer: &PublicKey, policy: FeePolicy,
+	) -> Result<(), LightningError> {
+		self.scid_store
+			.insert(ScidWithPeer::new(intercept_scid, peer.clone(), policy))
+			.map(|_| ())
+			.map_err(|e| {
+				log_error!(
+					self.logger,
+					"[LSPS4] Failed to persist intercept SCID {} for peer {}: {}",
+					intercept_scid,
+					peer,
+					e
+				);
+				LightningError {
+					err: format!("Failed to add intercepted SCID: {}", e),
+					action: ErrorAction::IgnoreAndLog(Level::Error),
+				}
+			})
+	}
+
 	fn handle_register_node_request(
-		&self, request_id: LSPSRequestId, counterparty_node_id: &PublicKey, _params: RegisterNodeRequest,
+		&self, request_id: LSPSRequestId, counterparty_node_id: &PublicKey, params: RegisterNodeRequest,
 	) -> Result<(), LightningError> {
 		let fn_start = Instant::now();
 		log_info!(
@@ -317,6 +373,8 @@ where
 		);
 
 		let step_start = Instant::now();
+		let granted_policy = self.resolve_claim_policy(counterparty_node_id, &params.fee_claim);
+
 		let intercept_scid = match self.scid_store.get_scid(counterparty_node_id) {
 			Some(intercept_scid) => {
 				log_info!(
@@ -326,6 +384,11 @@ where
 					intercept_scid,
 					counterparty_node_id
 				);
+				// Upsert a verified grant onto the existing record. An absent or invalid claim
+				// leaves the live policy untouched so a transient miss can't wipe a grant.
+				if let Some(policy) = granted_policy {
+					self.persist_scid_policy(intercept_scid, counterparty_node_id, policy)?;
+				}
 				intercept_scid
 			},
 			None => {
@@ -344,20 +407,8 @@ where
 					counterparty_node_id
 				);
 				let store_start = Instant::now();
-				self.scid_store.add_intercepted_scid(intercept_scid, counterparty_node_id.clone())
-					.map_err(|e| {
-						log_error!(
-							self.logger,
-							"[LSPS4] Failed to persist intercept SCID {} for peer {}: {}",
-							intercept_scid,
-							counterparty_node_id,
-							e
-						);
-						LightningError {
-							err: format!("Failed to add intercepted SCID: {}", e),
-							action: ErrorAction::IgnoreAndLog(Level::Error),
-						}
-					})?;
+				let policy = granted_policy.unwrap_or(FeePolicy::Flat(FeeTier::Standard));
+				self.persist_scid_policy(intercept_scid, counterparty_node_id, policy)?;
 				log_info!(
 					self.logger,
 					"TIMING: [LSPS4] handle_register_node_request scid_store.add_intercepted_scid() took {}ms - Successfully stored intercept SCID {} for peer {}",
@@ -415,6 +466,14 @@ where
 			skimmed_fee_msat: u64,
 		}
 
+		// The peer's granted policy, looked up once. Peers with no grant resolve to Standard, so
+		// the skim matches the historical 2% for everyone the issuer set hasn't waived.
+		let policy = self
+			.scid_store
+			.get_policy(&their_node_id)
+			.unwrap_or(FeePolicy::Flat(FeeTier::Standard));
+		let is_zero_fee = matches!(policy, FeePolicy::Flat(FeeTier::ZeroFee));
+
 		let mut computed_htlcs: Vec<ComputedHtlc> = htlcs
 			.drain(..)
 			.map(|htlc| {
@@ -424,33 +483,32 @@ where
 				}
 
 				let htlc_id = htlc.id();
-				let mut fee_msat = match crate::lsps4::utils::compute_forward_fee(
+				let skimmed_fee_msat = resolve_skim(
+					&policy,
 					expected_outbound_msat,
 					self.config.forwarding_fee_proportional_millionths,
-				) {
-					Some(fee) => core::cmp::min(fee, expected_outbound_msat),
-					None => {
+				);
+				if skimmed_fee_msat == 0 {
+					if is_zero_fee {
+						log_info!(
+							self.logger,
+							"Zero-fee policy for HTLC {:?}; forwarding the full amount.",
+							htlc_id
+						);
+					} else {
+						// A non-zero-fee tier skimmed nothing only because the fee would have
+						// consumed the entire HTLC; forward it intact rather than break it.
 						log_error!(
-						self.logger,
-						"Overflow while computing skimmed fee for intercepted HTLC {:?}. Skipping skim.",
-						htlc_id
-					);
-						0
-					},
-				};
-
-				let mut amount_to_forward_msat = expected_outbound_msat.saturating_sub(fee_msat);
-				if amount_to_forward_msat == 0 && fee_msat > 0 {
-					log_error!(
-						self.logger,
-						"Skimmed fee equaled the entire HTLC amount for {:?}. Skipping skim.",
-						htlc_id
-					);
-					fee_msat = 0;
-					amount_to_forward_msat = expected_outbound_msat;
+							self.logger,
+							"Skim would have consumed the entire HTLC {:?}; forwarding the full amount.",
+							htlc_id
+						);
+					}
 				}
 
-				ComputedHtlc { htlc, amount_to_forward_msat, skimmed_fee_msat: fee_msat }
+				let amount_to_forward_msat = expected_outbound_msat.saturating_sub(skimmed_fee_msat);
+
+				ComputedHtlc { htlc, amount_to_forward_msat, skimmed_fee_msat }
 			})
 			.collect();
 
