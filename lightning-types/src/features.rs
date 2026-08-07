@@ -174,7 +174,7 @@ mod sealed {
 			// Byte 18
 			,
 			// Byte 19
-			HtlcHold,
+			HtlcHold | SplicePrototypeLegacy,
 		]
 	);
 	define_context!(
@@ -203,7 +203,7 @@ mod sealed {
 			// Byte 18
 			,
 			// Byte 19
-			HtlcHold,
+			HtlcHold | SplicePrototypeLegacy,
 			// Byte 20 - 31
 			,,,,,,,,,,,,
 			// Byte 32
@@ -739,6 +739,17 @@ mod sealed {
 		clear_splicing,
 		supports_splicing,
 		requires_splicing
+	);
+	define_feature!(
+		155, // The splicing bit LDK used before 0.2.2 moved it to 63
+		SplicePrototypeLegacy,
+		[InitContext, NodeContext],
+		"Feature flags for channel splicing with peers on the pre-0.2.2 prototype bit.",
+		set_splicing_legacy_optional,
+		set_splicing_legacy_required,
+		clear_splicing_legacy,
+		supports_splicing_legacy,
+		requires_splicing_legacy
 	);
 	define_feature!(
 		259,

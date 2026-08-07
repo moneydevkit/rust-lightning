@@ -38,6 +38,7 @@ fn test_splicing_not_supported_api_error() {
 	let node_cfgs = create_node_cfgs(2, &chanmon_cfgs);
 	let mut features = provided_init_features(&test_default_channel_config());
 	features.clear_splicing();
+	features.clear_splicing_legacy();
 	*node_cfgs[0].override_init_features.borrow_mut() = Some(features);
 	let node_chanmgrs = create_node_chanmgrs(2, &node_cfgs, &[None, None]);
 	let nodes = create_network(2, &node_cfgs, &node_chanmgrs);
