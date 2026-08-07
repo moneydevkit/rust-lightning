@@ -4784,7 +4784,11 @@ where
 		};
 
 		let mut peer_state = peer_state_mutex.lock().unwrap();
-		if !peer_state.latest_features.supports_splicing() {
+		// Accept the legacy prototype bit too: un-upgraded clients advertise
+		// splicing on bit 155 and speak the same splice protocol. See MDK-799.
+		if !peer_state.latest_features.supports_splicing()
+			&& !peer_state.latest_features.supports_splicing_legacy()
+		{
 			return Err(APIError::ChannelUnavailable {
 				err: "Peer does not support splicing".to_owned(),
 			});
@@ -13786,8 +13790,10 @@ where
 		provided_node_features(&self.config.read().unwrap())
 	}
 
-	fn provided_init_features(&self, _their_init_features: PublicKey) -> InitFeatures {
-		provided_init_features(&self.config.read().unwrap())
+	fn provided_init_features(&self, their_node_id: PublicKey) -> InitFeatures {
+		let mut features = provided_init_features(&self.config.read().unwrap());
+		strip_acinq_splice_legacy(&mut features, &their_node_id);
+		features
 	}
 
 	#[rustfmt::skip]
@@ -15776,6 +15782,26 @@ pub(crate) fn provided_channel_type_features(config: &UserConfig) -> ChannelType
 	ChannelTypeFeatures::from_init(&provided_init_features(config))
 }
 
+/// ACINQ mainnet node id. Eclair chokes on an `Init` advertising both the
+/// legacy splice prototype bit (155, which eclair used for its own
+/// pre-standard splicing) and the production bit (63), so strip the legacy
+/// bit when peering with this specific node. ACINQ is on bit 63. The
+/// carve-out is intentionally per-peer `Init` only — gossip
+/// `node_announcement`s are broadcast, not per-peer. See MDK-799.
+const ACINQ_MAINNET_NODE_ID: [u8; 33] = [
+	0x03, 0x86, 0x4e, 0xf0, 0x25, 0xfd, 0xe8, 0xfb, 0x58, 0x7d, 0x98, 0x91, 0x86, 0xce, 0x6a, 0x4a,
+	0x18, 0x68, 0x95, 0xee, 0x44, 0xa9, 0x26, 0xbf, 0xc3, 0x70, 0xe2, 0xc3, 0x66, 0x59, 0x7a, 0x3f,
+	0x8f,
+];
+
+/// If `their_node_id` is the ACINQ mainnet node, clear the legacy splice
+/// prototype (bit 155) feature. See [`ACINQ_MAINNET_NODE_ID`] for context.
+fn strip_acinq_splice_legacy(features: &mut InitFeatures, their_node_id: &PublicKey) {
+	if their_node_id.serialize() == ACINQ_MAINNET_NODE_ID {
+		features.clear_splicing_legacy();
+	}
+}
+
 /// Fetches the set of [`InitFeatures`] flags that are provided by or required by
 /// [`ChannelManager`].
 pub fn provided_init_features(config: &UserConfig) -> InitFeatures {
@@ -15800,6 +15826,10 @@ pub fn provided_init_features(config: &UserConfig) -> InitFeatures {
 	features.set_simple_close_optional();
 	features.set_quiescence_optional();
 	features.set_splicing_optional();
+	// Dual-advertise the pre-0.2.2 prototype bit so un-upgraded clients still
+	// negotiate splicing. Stripped per-peer for ACINQ in the BaseMessageHandler
+	// impl. See MDK-799.
+	features.set_splicing_legacy_optional();
 
 	if config.channel_handshake_config.negotiate_anchors_zero_fee_htlc_tx {
 		features.set_anchors_zero_fee_htlc_tx_optional();
@@ -18507,6 +18537,28 @@ mod tests {
 	use bitcoin::secp256k1::ecdh::SharedSecret;
 	use bitcoin::secp256k1::{PublicKey, Secp256k1, SecretKey};
 	use core::sync::atomic::Ordering;
+
+	#[test]
+	fn test_splice_legacy_dual_advertise_and_acinq_strip() {
+		let config = crate::util::config::UserConfig::default();
+
+		let mut features = super::provided_init_features(&config);
+		assert!(features.supports_splicing());
+		assert!(features.supports_splicing_legacy());
+
+		// ACINQ gets the legacy bit stripped but keeps the production bit.
+		let acinq = PublicKey::from_slice(&super::ACINQ_MAINNET_NODE_ID).unwrap();
+		super::strip_acinq_splice_legacy(&mut features, &acinq);
+		assert!(features.supports_splicing());
+		assert!(!features.supports_splicing_legacy());
+
+		// Anyone else keeps both bits.
+		let mut features = super::provided_init_features(&config);
+		let other = PublicKey::from_slice(&[2; 33]).unwrap();
+		super::strip_acinq_splice_legacy(&mut features, &other);
+		assert!(features.supports_splicing());
+		assert!(features.supports_splicing_legacy());
+	}
 
 	#[test]
 	#[rustfmt::skip]
