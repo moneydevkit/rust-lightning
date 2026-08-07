@@ -1759,12 +1759,14 @@ fn lsps5_service_persist_resets_in_flight_counter_on_io_error() {
 		#[cfg(lsps1_service)]
 		lsps1_service_config: None,
 		lsps2_service_config: None,
+		lsps4_service_config: None,
 		lsps5_service_config: Some(LSPS5ServiceConfig::default()),
 		advertise_service: true,
 	};
 	let client_config = LiquidityClientConfig {
 		lsps1_client_config: None,
 		lsps2_client_config: None,
+		lsps4_client_config: None,
 		lsps5_client_config: Some(LSPS5ClientConfig::default()),
 	};
 	let time_provider: Arc<dyn TimeProvider + Send + Sync> = Arc::new(DefaultTimeProvider);
@@ -1785,6 +1787,7 @@ fn lsps5_service_persist_resets_in_flight_counter_on_io_error() {
 		Some(service_config),
 		None,
 		Arc::clone(&time_provider),
+		nodes[0].logger,
 	)
 	.unwrap();
 
@@ -1799,6 +1802,7 @@ fn lsps5_service_persist_resets_in_flight_counter_on_io_error() {
 		None,
 		Some(client_config),
 		Arc::clone(&time_provider),
+		nodes[1].logger,
 	)
 	.unwrap();
 
