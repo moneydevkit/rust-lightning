@@ -4,7 +4,7 @@
   inputs = {
     # Nixpkgs channel. New channels are released every 6 months.
     # See: https://github.com/NixOS/nixpkgs/tags
-    nixpkgs.url = "github:nixos/nixpkgs/25.11";
+    nixpkgs.url = "github:NixOS/nixpkgs/nixos-26.05";
 
     # This makes it easy for the flake to be multi-platform.
     # See: https://github.com/numtide/flake-utils
