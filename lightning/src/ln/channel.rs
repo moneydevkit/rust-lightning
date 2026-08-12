@@ -1165,6 +1165,7 @@ pub(super) struct ReestablishResponses {
 	pub shutdown_msg: Option<msgs::Shutdown>,
 	pub tx_signatures: Option<msgs::TxSignatures>,
 	pub tx_abort: Option<msgs::TxAbort>,
+	pub splice_locked: Option<msgs::SpliceLocked>,
 	pub inferred_splice_locked: Option<msgs::SpliceLocked>,
 }
 
@@ -10075,6 +10076,7 @@ where
 					shutdown_msg, announcement_sigs,
 					tx_signatures,
 					tx_abort: None,
+					splice_locked: None,
 					inferred_splice_locked: None,
 				});
 			}
@@ -10088,6 +10090,7 @@ where
 				shutdown_msg, announcement_sigs,
 				tx_signatures,
 				tx_abort,
+				splice_locked: None,
 				inferred_splice_locked: None,
 			});
 		}
@@ -10158,6 +10161,25 @@ where
 				})
 		});
 
+		// Their `next_funding` naming our locked splice txid means their signing session is
+		// still incomplete, so they cannot apply the `my_current_funding_locked` from our
+		// `channel_reestablish` (it only matches negotiated funding and is processed once).
+		// Retransmit `splice_locked` explicitly, ordered after the retransmitted
+		// `tx_signatures`, or they never learn of our lock and will force-close on our
+		// next non-batch `commitment_signed`.
+		let splice_locked = msg.next_funding.as_ref().and_then(|next_funding| {
+			self.pending_splice.as_ref().and_then(|pending_splice| {
+				pending_splice
+					.sent_funding_txid
+					.filter(|sent_txid| *sent_txid == next_funding.txid)
+					.filter(|sent_txid| Some(*sent_txid) != pending_splice.received_funding_txid)
+					.map(|splice_txid| msgs::SpliceLocked {
+						channel_id: self.context.channel_id,
+						splice_txid,
+					})
+			})
+		});
+
 		if msg.next_local_commitment_number == next_counterparty_commitment_number {
 			if required_revoke.is_some() || self.context.signer_pending_revoke_and_ack {
 				log_debug!(logger, "Reconnected channel {} with only lost outbound RAA", &self.context.channel_id());
@@ -10175,6 +10197,7 @@ where
 				commitment_order: self.context.resend_order.clone(),
 				tx_signatures,
 				tx_abort,
+				splice_locked: splice_locked.clone(),
 				inferred_splice_locked,
 			})
 		} else if msg.next_local_commitment_number == next_counterparty_commitment_number - 1 {
@@ -10200,6 +10223,7 @@ where
 					commitment_order: self.context.resend_order.clone(),
 					tx_signatures: None,
 					tx_abort,
+					splice_locked: splice_locked.clone(),
 					inferred_splice_locked,
 				})
 			} else {
@@ -10227,6 +10251,7 @@ where
 					commitment_order: self.context.resend_order.clone(),
 					tx_signatures: None,
 					tx_abort,
+					splice_locked: splice_locked.clone(),
 					inferred_splice_locked,
 				})
 			}
