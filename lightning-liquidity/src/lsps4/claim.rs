@@ -225,8 +225,7 @@ mod tests {
 		let claim = mint_claim(node_id(), FeePolicy::Flat(FeeTier::ZeroFee), &ISSUER_SECRET);
 		// A different counterparty than the one the claim is bound to.
 		let secp = Secp256k1::new();
-		let other =
-			PublicKey::from_secret_key(&secp, &SecretKey::from_slice(&[0x22; 32]).unwrap());
+		let other = PublicKey::from_secret_key(&secp, &SecretKey::from_slice(&[0x22; 32]).unwrap());
 		assert_eq!(
 			verify_claim(&verify_ctx(), &claim, &[issuer_xonly()], &other),
 			Err(ClaimError::NodeIdMismatch)
@@ -237,8 +236,12 @@ mod tests {
 	fn unknown_scheme_rejects() {
 		let secp = Secp256k1::new();
 		let keypair = issuer_keypair();
-		let payload = ClaimPayload { scheme: 2, node_id: node_id(), policy: FeePolicy::Flat(FeeTier::ZeroFee) }
-			.encode();
+		let payload = ClaimPayload {
+			scheme: 2,
+			node_id: node_id(),
+			policy: FeePolicy::Flat(FeeTier::ZeroFee),
+		}
+		.encode();
 		let digest = Message::from_digest(sha256::Hash::hash(&payload).to_byte_array());
 		let sig = secp.sign_schnorr_no_aux_rand(&digest, &keypair);
 		let claim = utils::to_string(&SignedFeeClaim { payload, sig }.encode());
@@ -286,10 +289,7 @@ mod tests {
 		// Any signed FeePolicy comes back intact, not just ZeroFee.
 		let policy = FeePolicy::Flat(FeeTier::Custom { ppm: 1_234, base_msat: 56 });
 		let claim = mint_claim(node_id(), policy.clone(), &ISSUER_SECRET);
-		assert_eq!(
-			verify_claim(&verify_ctx(), &claim, &[issuer_xonly()], &node_id()),
-			Ok(policy)
-		);
+		assert_eq!(verify_claim(&verify_ctx(), &claim, &[issuer_xonly()], &node_id()), Ok(policy));
 	}
 
 	/// The cross-repo contract the client and the issuer must reproduce byte-for-byte. The issuer

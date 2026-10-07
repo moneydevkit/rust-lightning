@@ -118,8 +118,8 @@ mod tests {
 	#[test]
 	fn standard_matches_legacy_across_sizes() {
 		let ppm = 20_000; // 2%
-		// All sizes below the u64 overflow threshold (~9.2e14 msat at 2%), where the new 128-bit
-		// math and the legacy u64 math agree exactly.
+					// All sizes below the u64 overflow threshold (~9.2e14 msat at 2%), where the new 128-bit
+					// math and the legacy u64 math agree exactly.
 		for amount in [0u64, 1, 999, 1_000, 50_000, 1_000_000, 100_000_000, 1_000_000_000_000] {
 			let policy = FeePolicy::Flat(FeeTier::Standard);
 			assert_eq!(

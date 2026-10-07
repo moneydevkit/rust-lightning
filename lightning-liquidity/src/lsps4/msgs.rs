@@ -14,9 +14,9 @@ use crate::lsps0::ser::{
 	string_amount, string_amount_option, LSPSMessage, LSPSRequestId, LSPSResponseError,
 };
 
+use crate::utils;
 use std::string::String;
 use std::vec::Vec;
-use crate::utils;
 
 pub(crate) const LSPS4_REGISTER_NODE_METHOD_NAME: &str = "lsps4.register_node";
 
