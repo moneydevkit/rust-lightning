@@ -5,11 +5,11 @@
 // http://opensource.org/licenses/MIT>, at your option. You may not use this file except in
 // accordance with one or both of these licenses.
 
-use lightning::util::ser::{Readable, Writeable};
-use lightning::{impl_writeable_tlv_based, log_error};
 use lightning::ln::channelmanager::InterceptId;
 use lightning::util::logger::Logger;
 use lightning::util::persist::KVStoreSync;
+use lightning::util::ser::{Readable, Writeable};
+use lightning::{impl_writeable_tlv_based, log_error};
 use lightning_types::payment::PaymentHash;
 
 use bitcoin::secp256k1::PublicKey;
@@ -26,7 +26,6 @@ use crate::lsps4::utils;
 /// The Intercepted HTLC store information will be persisted under this key.
 pub(crate) const INTERCEPTED_HTLC_STORE_PERSISTENCE_PRIMARY_NAMESPACE: &str = "intercepted_htlcs";
 pub(crate) const INTERCEPTED_HTLC_STORE_PERSISTENCE_SECONDARY_NAMESPACE: &str = "";
-
 
 /// Represents an intercepted HTLC that is stored in the data store
 #[derive(Clone, Debug, PartialEq)]
@@ -97,17 +96,21 @@ impl_writeable_tlv_based!(InterceptedHtlc, {
 });
 
 pub struct HTLCStore<L: Deref, KV: Deref + Clone>
-where L::Target: Logger, KV::Target: KVStoreSync {
+where
+	L::Target: Logger,
+	KV::Target: KVStoreSync,
+{
 	htlcs: Mutex<HashMap<InterceptId, InterceptedHtlc>>,
 	kv_store: KV,
-	logger: L
+	logger: L,
 }
 
 impl<L: Deref, KV: Deref + Clone> HTLCStore<L, KV>
-where L::Target: Logger, KV::Target: KVStoreSync {
-	pub(crate) fn new(
-		kv_store: KV, logger: L,
-	) -> Result<Self, io::Error> {
+where
+	L::Target: Logger,
+	KV::Target: KVStoreSync,
+{
+	pub(crate) fn new(kv_store: KV, logger: L) -> Result<Self, io::Error> {
 		let mut htlcs = Vec::new();
 
 		let stored_keys = kv_store.list(
@@ -124,16 +127,12 @@ where L::Target: Logger, KV::Target: KVStoreSync {
 			let mut reader = Cursor::new(data);
 			let htlc = InterceptedHtlc::read(&mut reader).map_err(|e| {
 				log_error!(logger, "Failed to deserialize InterceptedHtlc: {}", e);
-				io::Error::new(
-					io::ErrorKind::InvalidData,
-					"Failed to deserialize InterceptedHtlc",
-				)
+				io::Error::new(io::ErrorKind::InvalidData, "Failed to deserialize InterceptedHtlc")
 			})?;
 			htlcs.push(htlc);
 		}
 
-		let htlcs =
-			Mutex::new(HashMap::from_iter(htlcs.into_iter().map(|obj| (obj.id(), obj))));
+		let htlcs = Mutex::new(HashMap::from_iter(htlcs.into_iter().map(|obj| (obj.id(), obj))));
 
 		Ok(Self { htlcs, kv_store, logger })
 	}
@@ -163,7 +162,12 @@ where L::Target: Logger, KV::Target: KVStoreSync {
 		if removed {
 			let store_key = utils::to_string(&id.0);
 			self.kv_store
-				.remove(INTERCEPTED_HTLC_STORE_PERSISTENCE_PRIMARY_NAMESPACE, INTERCEPTED_HTLC_STORE_PERSISTENCE_SECONDARY_NAMESPACE, &store_key, false)
+				.remove(
+					INTERCEPTED_HTLC_STORE_PERSISTENCE_PRIMARY_NAMESPACE,
+					INTERCEPTED_HTLC_STORE_PERSISTENCE_SECONDARY_NAMESPACE,
+					&store_key,
+					false,
+				)
 				.map_err(|e| {
 					log_error!(
 						self.logger,
@@ -181,7 +185,9 @@ where L::Target: Logger, KV::Target: KVStoreSync {
 		self.htlcs.lock().unwrap().get(id).cloned()
 	}
 
-	pub(crate) fn list_filter<F: FnMut(&&InterceptedHtlc) -> bool>(&self, f: F) -> Vec<InterceptedHtlc> {
+	pub(crate) fn list_filter<F: FnMut(&&InterceptedHtlc) -> bool>(
+		&self, f: F,
+	) -> Vec<InterceptedHtlc> {
 		self.htlcs.lock().unwrap().values().filter(f).cloned().collect::<Vec<InterceptedHtlc>>()
 	}
 
@@ -204,14 +210,14 @@ where L::Target: Logger, KV::Target: KVStoreSync {
 		let store_key = utils::to_string(&htlc.id().0);
 		let data = htlc.encode();
 		self.kv_store
-			.write(INTERCEPTED_HTLC_STORE_PERSISTENCE_PRIMARY_NAMESPACE, INTERCEPTED_HTLC_STORE_PERSISTENCE_SECONDARY_NAMESPACE, &store_key, data)
+			.write(
+				INTERCEPTED_HTLC_STORE_PERSISTENCE_PRIMARY_NAMESPACE,
+				INTERCEPTED_HTLC_STORE_PERSISTENCE_SECONDARY_NAMESPACE,
+				&store_key,
+				data,
+			)
 			.map_err(|e| {
-				log_error!(
-					self.logger,
-					"Write for key {} failed due to: {}",
-					store_key,
-					e
-				);
+				log_error!(self.logger, "Write for key {} failed due to: {}", store_key, e);
 				e
 			})?;
 		Ok(())

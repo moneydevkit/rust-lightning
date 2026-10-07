@@ -9,7 +9,7 @@
 
 //! Contains the main LSPS4 server-side object, [`LSPS4ServiceHandler`].
 
-use crate::events::{LiquidityEvent, EventQueue};
+use crate::events::{EventQueue, LiquidityEvent};
 use crate::lsps0::ser::{
 	LSPSMessage, LSPSProtocolMessageHandler, LSPSRequestId, LSPSResponseError,
 	JSONRPC_INTERNAL_ERROR_ERROR_CODE, JSONRPC_INTERNAL_ERROR_ERROR_MESSAGE,
@@ -17,8 +17,8 @@ use crate::lsps0::ser::{
 };
 use crate::lsps4::claim::verify_claim;
 use crate::lsps4::event::LSPS4ServiceEvent;
-use crate::lsps4::htlc_store::{HTLCStore, InterceptedHtlc};
 use crate::lsps4::fee_policy::{resolve_skim, FeePolicy, FeeTier};
+use crate::lsps4::htlc_store::{HTLCStore, InterceptedHtlc};
 use crate::lsps4::scid_store::{ScidStore, ScidWithPeer};
 use crate::message_queue::MessageQueue;
 use crate::prelude::hash_map::Entry;
@@ -28,9 +28,9 @@ use crate::sync::{Arc, Mutex, MutexGuard, RwLock};
 use lightning::ln::channelmanager::{AChannelManager, InterceptId};
 use lightning::ln::msgs::{ErrorAction, LightningError};
 use lightning::ln::types::ChannelId;
-use lightning::{log_debug, log_error, log_info};
 use lightning::util::errors::APIError;
 use lightning::util::logger::{Level, Logger};
+use lightning::{log_debug, log_error, log_info};
 
 use lightning::util::persist::{KVStore, KVStoreSync};
 use lightning_types::payment::PaymentHash;
@@ -42,8 +42,7 @@ use core::sync::atomic::{AtomicUsize, Ordering};
 use std::collections::HashSet;
 
 use crate::lsps4::msgs::{
-	RegisterNodeRequest, RegisterNodeResponse, LSPS4Message, LSPS4Request,
-	LSPS4Response,
+	LSPS4Message, LSPS4Request, LSPS4Response, RegisterNodeRequest, RegisterNodeResponse,
 };
 
 use std::string::String;
@@ -143,12 +142,8 @@ where
 {
 	/// Constructs a `LSPS4ServiceHandler`.
 	pub(crate) async fn new(
-		pending_messages: Arc<MessageQueue>,
-		pending_events: Arc<EventQueue<K>>,
-		channel_manager: CM,
-		config: LSPS4ServiceConfig,
-		kv_store: K,
-		logger: L,
+		pending_messages: Arc<MessageQueue>, pending_events: Arc<EventQueue<K>>,
+		channel_manager: CM, config: LSPS4ServiceConfig, kv_store: K, logger: L,
 	) -> Result<Self, lightning::io::Error> {
 		Ok(Self {
 			pending_messages,
@@ -171,6 +166,11 @@ where
 	///
 	/// Will do nothing if the intercept scid does not match any of the ones we gave out.
 	///
+	/// Fails the HTLC back if it delivered less than `expected_outbound_amount_msat`, or if it
+	/// is no longer pending and what it delivered is therefore unknown. The expected amount
+	/// comes from the sender's onion and LDK does not check it for intercept SCIDs, so
+	/// forwarding it as-is could pay out more than we received.
+	///
 	/// [`Event::HTLCIntercepted`]: lightning::events::Event::HTLCIntercepted
 	/// [`LSPS4ServiceEvent::OpenChannel`]: crate::lsps4::event::LSPS4ServiceEvent::OpenChannel
 	pub fn htlc_intercepted(
@@ -186,11 +186,31 @@ where
 			payment_hash
 		);
 		if let Some(counterparty_node_id) = self.scid_store.get_peer(intercept_scid) {
+			// Fail closed: an intercept that is no longer pending counts as zero inbound.
+			let inbound_amount_msat = self
+				.channel_manager
+				.get_cm()
+				.intercepted_htlc_inbound_amount_msat(intercept_id)
+				.unwrap_or(0);
+			if inbound_amount_msat < expected_outbound_amount_msat {
+				log_error!(
+					self.logger,
+					"[LSPS4] Rejecting HTLC {:?} on SCID {}: inbound {} msat is below expected outbound {} msat. payment_hash: {}",
+					intercept_id,
+					intercept_scid,
+					inbound_amount_msat,
+					expected_outbound_amount_msat,
+					payment_hash
+				);
+				let _ = self.channel_manager.get_cm().fail_intercepted_htlc(intercept_id);
+				return Ok(());
+			}
 			log_info!(
 				self.logger,
-				"[LSPS4] SCID {} matched to peer {}, processing HTLC",
+				"[LSPS4] SCID {} matched to peer {} (inbound: {} msat), processing HTLC",
 				intercept_scid,
-				counterparty_node_id
+				counterparty_node_id,
+				inbound_amount_msat
 			);
 			let htlc = InterceptedHtlc::new(
 				intercept_id,
@@ -212,14 +232,16 @@ where
 					payment_hash
 				);
 				self.htlc_store.insert(htlc).unwrap(); // TODO: handle persistence failures
-				// Send webhook to wake the peer. When the peer reconnects,
-				// peer_connected() will find this HTLC in the store and process it.
-				// The process_pending_htlcs timer also serves as a fallback.
+										   // Send webhook to wake the peer. When the peer reconnects,
+										   // peer_connected() will find this HTLC in the store and process it.
+										   // The process_pending_htlcs timer also serves as a fallback.
 				let mut event_queue_notifier = self.pending_events.notifier();
-				event_queue_notifier.enqueue(crate::events::LiquidityEvent::LSPS4Service(LSPS4ServiceEvent::SendWebhook {
-					counterparty_node_id: counterparty_node_id.clone(),
-					payment_hash,
-				}));
+				event_queue_notifier.enqueue(crate::events::LiquidityEvent::LSPS4Service(
+					LSPS4ServiceEvent::SendWebhook {
+						counterparty_node_id: counterparty_node_id.clone(),
+						payment_hash,
+					},
+				));
 			} else {
 				let channels = self
 					.channel_manager
@@ -263,13 +285,11 @@ where
 							e
 						);
 						false
-					}
+					},
 				};
 
-				let actions = self.calculate_htlc_actions_for_peer(
-					counterparty_node_id,
-					vec![htlc],
-				);
+				let actions =
+					self.calculate_htlc_actions_for_peer(counterparty_node_id, vec![htlc]);
 
 				log_debug!(
 					self.logger,
@@ -323,9 +343,7 @@ where
 	/// Will attempt to forward pending htlcs for this counterparty if there are any.
 	///
 	/// [`Event::ChannelReady`]: lightning::events::Event::ChannelReady
-	pub fn channel_ready(
-		&self, counterparty_node_id: &PublicKey,
-	) -> Result<(), APIError> {
+	pub fn channel_ready(&self, counterparty_node_id: &PublicKey) -> Result<(), APIError> {
 		// Clear liquidity cooldown on channel_ready. This fires for both new channels
 		// and splice completions (splice_locked), allowing immediate retry if needed.
 		self.liquidity_cooldown.write().unwrap().remove(counterparty_node_id);
@@ -349,10 +367,8 @@ where
 			);
 
 			// Log channel states at channel_ready time - key diagnostic for race condition
-			let channels = self
-				.channel_manager
-				.get_cm()
-				.list_channels_with_counterparty(counterparty_node_id);
+			let channels =
+				self.channel_manager.get_cm().list_channels_with_counterparty(counterparty_node_id);
 			for ch in &channels {
 				log_info!(
 					self.logger,
@@ -394,10 +410,8 @@ where
 		// Log channel states BEFORE attempting to forward - key diagnostic for race condition.
 		// If is_usable is false but is_channel_ready is true, the channel hasn't completed
 		// ChannelReestablish yet and forward_intercepted_htlc will silently fail later.
-		let channels = self
-			.channel_manager
-			.get_cm()
-			.list_channels_with_counterparty(&counterparty_node_id);
+		let channels =
+			self.channel_manager.get_cm().list_channels_with_counterparty(&counterparty_node_id);
 		for ch in &channels {
 			log_info!(
 				self.logger,
@@ -448,8 +462,6 @@ where
 			fn_start.elapsed().as_millis(),
 			counterparty_node_id
 		);
-
-
 	}
 
 	/// Handle expired HTLCs.
@@ -655,7 +667,8 @@ where
 	}
 
 	fn handle_register_node_request(
-		&self, request_id: LSPSRequestId, counterparty_node_id: &PublicKey, params: RegisterNodeRequest,
+		&self, request_id: LSPSRequestId, counterparty_node_id: &PublicKey,
+		params: RegisterNodeRequest,
 	) -> Result<(), LightningError> {
 		log_info!(
 			self.logger,
@@ -698,7 +711,7 @@ where
 					counterparty_node_id
 				);
 				intercept_scid
-			}
+			},
 		};
 
 		log_info!(
@@ -710,10 +723,17 @@ where
 		);
 
 		let mut message_queue_notifier = self.pending_messages.notifier();
-		message_queue_notifier.enqueue(counterparty_node_id, LSPS4Message::Response(request_id, LSPS4Response::RegisterNode(RegisterNodeResponse {
-			jit_channel_scid: intercept_scid.into(),
-			lsp_cltv_expiry_delta: self.config.cltv_expiry_delta,
-		})).into());
+		message_queue_notifier.enqueue(
+			counterparty_node_id,
+			LSPS4Message::Response(
+				request_id,
+				LSPS4Response::RegisterNode(RegisterNodeResponse {
+					jit_channel_scid: intercept_scid.into(),
+					lsp_cltv_expiry_delta: self.config.cltv_expiry_delta,
+				}),
+			)
+			.into(),
+		);
 
 		log_info!(
 			self.logger,
@@ -822,7 +842,8 @@ where
 					}
 				}
 
-				let amount_to_forward_msat = expected_outbound_msat.saturating_sub(skimmed_fee_msat);
+				let amount_to_forward_msat =
+					expected_outbound_msat.saturating_sub(skimmed_fee_msat);
 
 				ComputedHtlc { htlc, amount_to_forward_msat, skimmed_fee_msat }
 			})
@@ -1083,10 +1104,10 @@ where
 		// future use cases (e.g., cleanup, pruning, etc.).
 		Ok(())
 	}
-
 }
 
-impl<CM: Deref + Clone, K: Deref + Clone, L: Deref + Clone> LSPSProtocolMessageHandler for LSPS4ServiceHandler<CM, K, L>
+impl<CM: Deref + Clone, K: Deref + Clone, L: Deref + Clone> LSPSProtocolMessageHandler
+	for LSPS4ServiceHandler<CM, K, L>
 where
 	CM::Target: AChannelManager,
 	K::Target: KVStore + KVStoreSync,

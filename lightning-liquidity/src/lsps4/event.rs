@@ -10,10 +10,10 @@
 //! Contains LSPS4 event types
 
 use crate::lsps0::ser::LSPSRequestId;
-use std::string::String;
-use std::vec::Vec;
 use lightning::ln::types::ChannelId;
 use lightning_types::payment::PaymentHash;
+use std::string::String;
+use std::vec::Vec;
 
 use bitcoin::secp256k1::PublicKey;
 

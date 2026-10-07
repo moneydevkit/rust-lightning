@@ -680,7 +680,10 @@ impl<'de, 'a> Visitor<'de> for LSPSMessageVisitor<'a> {
 				LSPSMethod::LSPS4RegisterNode => {
 					let request = serde_json::from_value(params.unwrap_or(json!({})))
 						.map_err(de::Error::custom)?;
-					Ok(LSPSMessage::LSPS4(LSPS4Message::Request(id, LSPS4Request::RegisterNode(request))))
+					Ok(LSPSMessage::LSPS4(LSPS4Message::Request(
+						id,
+						LSPS4Request::RegisterNode(request),
+					)))
 				},
 				LSPSMethod::LSPS5SetWebhook => {
 					let request = serde_json::from_value(params.unwrap_or(json!({})))

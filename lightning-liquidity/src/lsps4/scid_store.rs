@@ -5,19 +5,18 @@
 // http://opensource.org/licenses/MIT>, at your option. You may not use this file except in
 // accordance with one or both of these licenses.
 
-use lightning::util::ser::{Readable, Writeable};
-use lightning::{impl_writeable_tlv_based, log_error};
 use lightning::util::logger::Logger;
 use lightning::util::persist::KVStoreSync;
+use lightning::util::ser::{Readable, Writeable};
+use lightning::{impl_writeable_tlv_based, log_error};
 
 use bitcoin::secp256k1::PublicKey;
 
 use lightning::io::{self, Cursor};
 
+use crate::sync::RwLock;
 use std::collections::HashMap;
 use std::ops::Deref;
-use crate::sync::RwLock;
-
 
 use crate::lsps4::fee_policy::{FeePolicy, FeeTier};
 use crate::lsps4::utils;
@@ -25,7 +24,6 @@ use crate::lsps4::utils;
 /// The Intercepted HTLC store information will be persisted under this key.
 pub(crate) const INTERCEPT_SCID_STORE_PERSISTENCE_PRIMARY_NAMESPACE: &str = "intercept_scids";
 pub(crate) const INTERCEPT_SCID_STORE_PERSISTENCE_SECONDARY_NAMESPACE: &str = "";
-
 
 /// Represents an intercepted HTLC that is stored in the data store
 #[derive(Clone, Debug, PartialEq)]
@@ -36,9 +34,7 @@ pub struct ScidWithPeer {
 }
 
 impl ScidWithPeer {
-	pub fn new(
-		scid: u64, peer_id: PublicKey, policy: FeePolicy,
-	) -> Self {
+	pub fn new(scid: u64, peer_id: PublicKey, policy: FeePolicy) -> Self {
 		Self { scid, peer_id, policy }
 	}
 
@@ -66,19 +62,23 @@ impl_writeable_tlv_based!(ScidWithPeer, {
 });
 
 pub struct ScidStore<L: Deref, KV: Deref + Clone>
-where L::Target: Logger, KV::Target: KVStoreSync {
+where
+	L::Target: Logger,
+	KV::Target: KVStoreSync,
+{
 	peer_by_scid: RwLock<HashMap<u64, PublicKey>>,
 	scid_by_peer: RwLock<HashMap<PublicKey, u64>>,
 	policy_by_peer: RwLock<HashMap<PublicKey, FeePolicy>>,
 	kv_store: KV,
-	logger: L
+	logger: L,
 }
 
 impl<L: Deref, KV: Deref + Clone> ScidStore<L, KV>
-where L::Target: Logger, KV::Target: KVStoreSync {
-	pub(crate) fn new(
-		kv_store: KV, logger: L,
-	) -> Result<Self, io::Error> {
+where
+	L::Target: Logger,
+	KV::Target: KVStoreSync,
+{
+	pub(crate) fn new(kv_store: KV, logger: L) -> Result<Self, io::Error> {
 		let mut scids = Vec::new();
 
 		let stored_keys = kv_store.list(
@@ -95,10 +95,7 @@ where L::Target: Logger, KV::Target: KVStoreSync {
 			let mut reader = Cursor::new(data);
 			let scid = ScidWithPeer::read(&mut reader).map_err(|e| {
 				log_error!(logger, "Failed to deserialize InterceptScid: {}", e);
-				io::Error::new(
-					io::ErrorKind::InvalidData,
-					"Failed to deserialize InterceptScid",
-				)
+				io::Error::new(io::ErrorKind::InvalidData, "Failed to deserialize InterceptScid")
 			})?;
 			scids.push(scid);
 		}
@@ -118,7 +115,12 @@ where L::Target: Logger, KV::Target: KVStoreSync {
 
 	pub(crate) fn insert(&self, scid: ScidWithPeer) -> Result<bool, io::Error> {
 		use lightning::log_info;
-		log_info!(self.logger, "[LSPS4 ScidStore] Inserting SCID {} for peer {}", scid.scid(), scid.peer_id());
+		log_info!(
+			self.logger,
+			"[LSPS4 ScidStore] Inserting SCID {} for peer {}",
+			scid.scid(),
+			scid.peer_id()
+		);
 
 		// Persist first
 		self.persist(&scid)?;
@@ -153,7 +155,12 @@ where L::Target: Logger, KV::Target: KVStoreSync {
 			locked_policy_by_peer.remove(&peer_id);
 			let store_key = utils::to_string(&scid.to_be_bytes());
 			self.kv_store
-				.remove(INTERCEPT_SCID_STORE_PERSISTENCE_PRIMARY_NAMESPACE, INTERCEPT_SCID_STORE_PERSISTENCE_SECONDARY_NAMESPACE, &store_key, false)
+				.remove(
+					INTERCEPT_SCID_STORE_PERSISTENCE_PRIMARY_NAMESPACE,
+					INTERCEPT_SCID_STORE_PERSISTENCE_SECONDARY_NAMESPACE,
+					&store_key,
+					false,
+				)
 				.map_err(|e| {
 					log_error!(
 						self.logger,
@@ -171,14 +178,14 @@ where L::Target: Logger, KV::Target: KVStoreSync {
 		let store_key = scid.store_key();
 		let data = scid.encode();
 		self.kv_store
-			.write(INTERCEPT_SCID_STORE_PERSISTENCE_PRIMARY_NAMESPACE, INTERCEPT_SCID_STORE_PERSISTENCE_SECONDARY_NAMESPACE, &store_key, data)
+			.write(
+				INTERCEPT_SCID_STORE_PERSISTENCE_PRIMARY_NAMESPACE,
+				INTERCEPT_SCID_STORE_PERSISTENCE_SECONDARY_NAMESPACE,
+				&store_key,
+				data,
+			)
 			.map_err(|e| {
-				log_error!(
-					self.logger,
-					"Write for key {} failed due to: {}",
-					store_key,
-					e
-				);
+				log_error!(self.logger, "Write for key {} failed due to: {}", store_key, e);
 				e
 			})?;
 		Ok(())
@@ -187,24 +194,14 @@ where L::Target: Logger, KV::Target: KVStoreSync {
 	pub fn get_peer(&self, scid: u64) -> Option<PublicKey> {
 		use lightning::log_debug;
 		let result = self.peer_by_scid.read().unwrap().get(&scid).cloned();
-		log_debug!(
-			self.logger,
-			"[LSPS4 ScidStore] get_peer({}) = {:?}",
-			scid,
-			result
-		);
+		log_debug!(self.logger, "[LSPS4 ScidStore] get_peer({}) = {:?}", scid, result);
 		result
 	}
 
 	pub fn get_scid(&self, peer_id: &PublicKey) -> Option<u64> {
 		use lightning::log_debug;
 		let result = self.scid_by_peer.read().unwrap().get(peer_id).cloned();
-		log_debug!(
-			self.logger,
-			"[LSPS4 ScidStore] get_scid({}) = {:?}",
-			peer_id,
-			result
-		);
+		log_debug!(self.logger, "[LSPS4 ScidStore] get_scid({}) = {:?}", peer_id, result);
 		result
 	}
 
@@ -286,8 +283,7 @@ mod tests {
 	fn load_rebuilds_policy_map() {
 		let kv_store = Arc::new(TestStore::new(false));
 		{
-			let store =
-				ScidStore::new(kv_store.clone(), Arc::new(TestLogger::new())).unwrap();
+			let store = ScidStore::new(kv_store.clone(), Arc::new(TestLogger::new())).unwrap();
 			store
 				.insert(ScidWithPeer::new(42, test_peer(), FeePolicy::Flat(FeeTier::ZeroFee)))
 				.unwrap();
@@ -300,7 +296,9 @@ mod tests {
 	#[test]
 	fn default_record_resolves_to_standard_policy() {
 		let store = test_store();
-		store.insert(ScidWithPeer::new(42, test_peer(), FeePolicy::Flat(FeeTier::Standard))).unwrap();
+		store
+			.insert(ScidWithPeer::new(42, test_peer(), FeePolicy::Flat(FeeTier::Standard)))
+			.unwrap();
 
 		assert_eq!(store.get_policy(&test_peer()), Some(FeePolicy::Flat(FeeTier::Standard)));
 	}
