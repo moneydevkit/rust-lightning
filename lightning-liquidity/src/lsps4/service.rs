@@ -758,14 +758,23 @@ where
 			if !channel.is_usable {
 				continue;
 			}
-			channel_capacity_map.insert(channel.channel_id, channel.outbound_capacity_msat);
+			// Budget by the largest HTLC LDK will actually send, not `outbound_capacity_msat`: the
+			// latter ignores the commitment fee we pay (as funder) for one more HTLC output, plus
+			// dust exposure and in-flight limits. An HTLC in that gap is accepted by
+			// `forward_intercepted_htlc` and then failed back by LDK with temporary_channel_failure
+			// instead of triggering a splice.
+			// ponytail: later HTLCs in the same batch subtract only their amount, not the extra
+			// commitment fee each one adds, so a multi-HTLC batch can still overshoot. That case
+			// fails back (no funds move) and the sender retries; track per-HTLC fee if it shows up.
+			channel_capacity_map.insert(channel.channel_id, channel.next_outbound_htlc_limit_msat);
 			log_info!(
 				self.logger,
-				"[LSPS4] calculate_htlc_actions: channel {} - is_usable: {}, is_channel_ready: {}, outbound_capacity: {}msat",
+				"[LSPS4] calculate_htlc_actions: channel {} - is_usable: {}, is_channel_ready: {}, outbound_capacity: {}msat, next_outbound_htlc_limit: {}msat",
 				channel.channel_id,
 				channel.is_usable,
 				channel.is_channel_ready,
-				channel.outbound_capacity_msat
+				channel.outbound_capacity_msat,
+				channel.next_outbound_htlc_limit_msat
 			);
 		}
 
