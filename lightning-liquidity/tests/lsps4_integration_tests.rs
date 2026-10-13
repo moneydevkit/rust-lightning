@@ -8,6 +8,7 @@ use common::{
 
 use lightning::check_added_monitors;
 use lightning::events::Event;
+use lightning::ln::channel_state::ChannelDetails;
 use lightning::ln::channelmanager::RecipientOnionFields;
 use lightning::ln::channelmanager::{InterceptId, PaymentId};
 use lightning::ln::functional_test_utils::{
@@ -63,6 +64,21 @@ fn register(service_node: &LiquidityNode, client_node: &LiquidityNode) -> u64 {
 }
 
 fn run(test: impl FnOnce(&LSPSNodesWithPayer, u64)) {
+	run_with(None, |nodes, scid, _| test(nodes, scid));
+}
+
+/// Like [`run`], plus a usable LSP -> client channel of `value_sat`, funded by the LSP, as a JIT
+/// channel would be. Passes the LSP's view of that channel.
+fn run_with_client_channel(
+	value_sat: u64, test: impl FnOnce(&LSPSNodesWithPayer, u64, ChannelDetails),
+) {
+	run_with(Some(value_sat), |nodes, scid, channel| test(nodes, scid, channel.unwrap()));
+}
+
+fn run_with(
+	client_channel_sat: Option<u64>,
+	test: impl FnOnce(&LSPSNodesWithPayer, u64, Option<ChannelDetails>),
+) {
 	let chanmon_cfgs = create_chanmon_cfgs(3);
 	let node_cfgs = create_node_cfgs(3, &chanmon_cfgs);
 	let mut lsp_config = test_default_channel_config();
@@ -100,8 +116,21 @@ fn run(test: impl FnOnce(&LSPSNodesWithPayer, u64)) {
 		1_000_000,
 		0,
 	);
+	let channel = client_channel_sat.map(|value_sat| {
+		create_chan_between_nodes_with_value(
+			&lsps_nodes.service_node.inner,
+			&lsps_nodes.client_node.inner,
+			value_sat,
+			0,
+		);
+		let client_id = lsps_nodes.client_node.node.get_our_node_id();
+		let channels = lsps_nodes.service_node.node.list_channels_with_counterparty(&client_id);
+		assert_eq!(channels.len(), 1);
+		assert!(channels[0].is_usable);
+		channels.into_iter().next().unwrap()
+	});
 	let intercept_scid = register(&lsps_nodes.service_node, &lsps_nodes.client_node);
-	test(&lsps_nodes, intercept_scid);
+	test(&lsps_nodes, intercept_scid, channel);
 }
 
 fn path_to_client(
@@ -317,5 +346,79 @@ fn intercept_no_longer_pending_is_rejected() {
 
 		handle(&nodes.service_node, scid, &htlc);
 		assert!(nodes.service_node.liquidity_manager.next_event().is_none());
+	});
+}
+
+/// Smallest HTLC amount whose post-skim forward (2%, rounded up) is at least `min_forward_msat`.
+fn htlc_forwarding_at_least(min_forward_msat: u64) -> u64 {
+	let to_forward = |amt: u64| amt - (amt * 20_000 + 999_999) / 1_000_000;
+	(min_forward_msat..).find(|amt| to_forward(*amt) >= min_forward_msat).unwrap()
+}
+
+/// `outbound_capacity_msat` ignores the commitment fee the funder pays for one more HTLC output,
+/// so the largest HTLC LDK will actually send (`next_outbound_htlc_limit_msat`) is smaller. An HTLC
+/// in that gap used to be "forwarded", then failed back by LDK with temporary_channel_failure
+/// (seen in regtest on the 4th payment into a 50k sat JIT channel). It must get liquidity instead.
+#[test]
+fn htlc_above_send_limit_but_within_capacity_gets_liquidity() {
+	run_with_client_channel(100_000, |nodes, scid, channel| {
+		let limit = channel.next_outbound_htlc_limit_msat;
+		assert!(
+			limit < channel.outbound_capacity_msat,
+			"test needs a gap: limit {} capacity {}",
+			limit,
+			channel.outbound_capacity_msat
+		);
+		connect_client(nodes);
+
+		let amount = htlc_forwarding_at_least(limit + 1);
+		let htlc = intercept_htlc(nodes, scid, 1, 0, amount, None);
+		assert!(
+			htlc.expected_outbound_amount_msat - (amount * 2 / 100)
+				<= channel.outbound_capacity_msat
+		);
+		handle(&nodes.service_node, scid, &htlc);
+
+		match nodes.service_node.liquidity_manager.next_event() {
+			Some(LiquidityEvent::LSPS4Service(LSPS4ServiceEvent::SpliceChannel {
+				channel_id,
+				amt_to_forward_msat,
+				..
+			})) => {
+				assert_eq!(channel_id, channel.channel_id);
+				assert!(amt_to_forward_msat > limit);
+			},
+			e => panic!("Expected SpliceChannel, got {:?}", e),
+		}
+		// Still held for the timer to forward after the splice, not sent and not failed.
+		assert_eq!(
+			nodes.service_node.node.intercepted_htlc_inbound_amount_msat(htlc.id),
+			Some(amount)
+		);
+		nodes.service_node.node.process_pending_htlc_forwards();
+		assert!(nodes.service_node.node.get_and_clear_pending_events().is_empty());
+	});
+}
+
+/// Control: an HTLC exactly at the send limit is forwarded and reaches the client.
+#[test]
+fn htlc_at_send_limit_is_forwarded() {
+	run_with_client_channel(100_000, |nodes, scid, channel| {
+		let limit = channel.next_outbound_htlc_limit_msat;
+		connect_client(nodes);
+
+		// Largest amount whose forward still fits the limit.
+		let amount = htlc_forwarding_at_least(limit + 1) - 1;
+		let htlc = intercept_htlc(nodes, scid, 1, 0, amount, None);
+		handle(&nodes.service_node, scid, &htlc);
+		assert!(nodes.service_node.liquidity_manager.next_event().is_none());
+
+		nodes.service_node.node.process_pending_htlc_forwards();
+		assert!(nodes.service_node.node.get_and_clear_pending_events().is_empty());
+		check_added_monitors!(nodes.service_node.inner, 1);
+		let msgs = nodes.service_node.node.get_and_clear_pending_msg_events();
+		let to_client = SendEvent::from_event(msgs.into_iter().next().unwrap());
+		assert_eq!(to_client.node_id, nodes.client_node.node.get_our_node_id());
+		assert!(to_client.msgs[0].amount_msat <= limit);
 	});
 }
