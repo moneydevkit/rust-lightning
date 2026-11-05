@@ -2649,6 +2649,265 @@ fn test_splice_minimum_depth_not_applied_for_self_initiated() {
 	send_payment(&nodes[0], &[&nodes[1]], 100_000);
 }
 
+/// Delivers splice negotiation messages between `nodes[0]` and `nodes[1]` (both directions) and
+/// signs funding txs on `FundingTransactionReadyForSigning`, until no node has anything left to
+/// send. `splice_locked` is not delivered; each node's is returned instead.
+fn exchange_splice_msgs_until_quiet(
+	nodes: &[Node],
+) -> (Option<msgs::SpliceLocked>, Option<msgs::SpliceLocked>) {
+	let mut splice_locked = [None, None];
+	loop {
+		let mut progressed = false;
+		for (from_idx, to_idx) in [(0, 1), (1, 0)] {
+			let (from, to) = (&nodes[from_idx], &nodes[to_idx]);
+			let from_id = from.node.get_our_node_id();
+			for event in from.node.get_and_clear_pending_events() {
+				match event {
+					Event::FundingTransactionReadyForSigning {
+						channel_id,
+						counterparty_node_id,
+						unsigned_transaction,
+						..
+					} => {
+						let tx = from.wallet_source.sign_tx(unsigned_transaction).unwrap();
+						from.node
+							.funding_transaction_signed(&channel_id, &counterparty_node_id, tx)
+							.unwrap();
+						progressed = true;
+					},
+					Event::SplicePending { .. } => {},
+					e => panic!("Unexpected event {e:?}"),
+				}
+			}
+			for msg_event in from.node.get_and_clear_pending_msg_events() {
+				progressed = true;
+				match msg_event {
+					MessageSendEvent::SendTxAddInput { msg, .. } => {
+						to.node.handle_tx_add_input(from_id, &msg)
+					},
+					MessageSendEvent::SendTxAddOutput { msg, .. } => {
+						to.node.handle_tx_add_output(from_id, &msg)
+					},
+					MessageSendEvent::SendTxComplete { msg, .. } => {
+						to.node.handle_tx_complete(from_id, &msg)
+					},
+					MessageSendEvent::UpdateHTLCs { updates, .. } => {
+						to.node.handle_commitment_signed(from_id, &updates.commitment_signed[0])
+					},
+					MessageSendEvent::SendTxSignatures { msg, .. } => {
+						to.node.handle_tx_signatures(from_id, &msg)
+					},
+					MessageSendEvent::SendSpliceLocked { msg, .. } => {
+						splice_locked[from_idx] = Some(msg)
+					},
+					e => panic!("Unexpected message {e:?}"),
+				}
+			}
+		}
+		if !progressed {
+			let [a, b] = splice_locked;
+			return (a, b);
+		}
+	}
+}
+
+#[test]
+fn test_splice_minimum_depth_for_self_initiated_with_counterparty_inputs() {
+	// The LSP initiates a splice-in on a 0-conf channel and the counterparty adds its own inputs
+	// (the protocol allows it). The counterparty can double-spend those inputs, so the splice tx
+	// may never confirm. If the LSP sent splice_locked at 0-conf, the counterparty could spend the
+	// new balance through the LSP and then kill the splice. The LSP must wait for
+	// splice_minimum_depth confirmations, exactly as for counterparty-initiated splices.
+	let chanmon_cfgs = create_chanmon_cfgs(2);
+	let node_cfgs = create_node_cfgs(2, &chanmon_cfgs);
+
+	let mut lsp_config = test_default_channel_config();
+	lsp_config.manually_accept_inbound_channels = true;
+	lsp_config.channel_handshake_limits.trust_own_funding_0conf = true;
+	lsp_config.channel_handshake_config.splice_minimum_depth = Some(6);
+
+	let mut client_config = test_default_channel_config();
+	client_config.manually_accept_inbound_channels = true;
+	client_config.channel_handshake_limits.trust_own_funding_0conf = true;
+
+	let node_chanmgrs =
+		create_node_chanmgrs(2, &node_cfgs, &[Some(lsp_config), Some(client_config)]);
+	let nodes = create_network(2, &node_cfgs, &node_chanmgrs);
+
+	let node_id_a = nodes[0].node.get_our_node_id();
+	let node_id_b = nodes[1].node.get_our_node_id();
+
+	let (funding_tx, channel_id) =
+		open_zero_conf_channel_with_value(&nodes[1], &nodes[0], None, 1_000_000, 0);
+	mine_transaction(&nodes[0], &funding_tx);
+	mine_transaction(&nodes[1], &funding_tx);
+
+	let coinbase_tx = provide_anchor_reserves(&nodes);
+	let lsp_contribution = SpliceContribution::SpliceIn {
+		value: Amount::from_sat(500_000),
+		inputs: vec![FundingTxInput::new_p2wpkh(coinbase_tx.clone(), 0).unwrap()],
+		change_script: Some(nodes[0].wallet_source.get_change_script().unwrap()),
+	};
+	// node_b answers splice_init with its own contribution and inputs.
+	let client_input = BitcoinOutPoint { txid: coinbase_tx.compute_txid(), vout: 1 };
+	crate::ln::channel::TEST_SPLICE_ACCEPTOR_CONTRIBUTION.with(|c| {
+		*c.borrow_mut() = Some(SpliceContribution::SpliceIn {
+			value: Amount::from_sat(100_000),
+			inputs: vec![FundingTxInput::new_p2wpkh(coinbase_tx.clone(), 1).unwrap()],
+			change_script: Some(nodes[1].wallet_source.get_change_script().unwrap()),
+		})
+	});
+
+	complete_splice_handshake(&nodes[0], &nodes[1], channel_id, lsp_contribution);
+	let (lsp_splice_locked, client_splice_locked) = exchange_splice_msgs_until_quiet(&nodes);
+	check_added_monitors(&nodes[0], 1);
+	check_added_monitors(&nodes[1], 1);
+
+	let splice_tx = {
+		let mut txn = nodes[0].tx_broadcaster.txn_broadcast();
+		assert_eq!(txn.len(), 1);
+		assert_eq!(nodes[1].tx_broadcaster.txn_broadcast(), txn);
+		txn.remove(0)
+	};
+	assert!(
+		splice_tx.input.iter().any(|input| input.previous_output == client_input),
+		"splice tx must spend the counterparty's input"
+	);
+
+	// --- Key assertion: the LSP must not lock a splice whose inputs the peer can double-spend ---
+	assert!(
+		lsp_splice_locked.is_none(),
+		"LSP sent 0-conf splice_locked although the counterparty contributed inputs: {lsp_splice_locked:?}"
+	);
+	// The client has no splice_minimum_depth, so it locks at 0-conf.
+	let client_splice_locked = client_splice_locked.expect("client locks at 0-conf");
+
+	mine_transaction(&nodes[0], &splice_tx);
+	mine_transaction(&nodes[1], &splice_tx);
+	connect_blocks(&nodes[0], 4);
+	connect_blocks(&nodes[1], 4);
+	let lsp_msgs = nodes[0].node.get_and_clear_pending_msg_events();
+	assert!(
+		!lsp_msgs.iter().any(|m| matches!(m, MessageSendEvent::SendSpliceLocked { .. })),
+		"LSP should not send splice_locked at 5 confs (need 6), got: {lsp_msgs:?}"
+	);
+	nodes[1].node.get_and_clear_pending_msg_events();
+
+	connect_blocks(&nodes[0], 1);
+	connect_blocks(&nodes[1], 1);
+	let lsp_splice_locked = get_event_msg!(nodes[0], MessageSendEvent::SendSpliceLocked, node_id_b);
+
+	let (prev_funding_outpoint, prev_funding_script) = nodes[0]
+		.chain_monitor
+		.chain_monitor
+		.get_monitor(channel_id)
+		.map(|monitor| (monitor.get_funding_txo(), monitor.get_funding_script()))
+		.unwrap();
+
+	nodes[0].node.handle_splice_locked(node_id_b, &client_splice_locked);
+	nodes[1].node.handle_splice_locked(node_id_a, &lsp_splice_locked);
+	let mut b_msgs = nodes[1].node.get_and_clear_pending_msg_events();
+	assert_eq!(b_msgs.len(), 1, "{b_msgs:?}");
+	if let MessageSendEvent::SendAnnouncementSignatures { ref msg, .. } = b_msgs.remove(0) {
+		nodes[0].node.handle_announcement_signatures(node_id_b, msg);
+	} else {
+		panic!("Expected SendAnnouncementSignatures, got {:?}", b_msgs);
+	}
+
+	expect_channel_ready_event(&nodes[0], &node_id_b);
+	check_added_monitors(&nodes[0], 1);
+	expect_channel_ready_event(&nodes[1], &node_id_a);
+	check_added_monitors(&nodes[1], 1);
+
+	let mut a_msgs = nodes[0].node.get_and_clear_pending_msg_events();
+	assert_eq!(a_msgs.len(), 2, "{a_msgs:?}");
+	if let MessageSendEvent::SendAnnouncementSignatures { ref msg, .. } = a_msgs.remove(0) {
+		nodes[1].node.handle_announcement_signatures(node_id_a, msg);
+	} else {
+		panic!("Expected SendAnnouncementSignatures");
+	}
+	assert!(matches!(a_msgs.remove(0), MessageSendEvent::BroadcastChannelAnnouncement { .. }));
+	let mut b_msgs = nodes[1].node.get_and_clear_pending_msg_events();
+	assert_eq!(b_msgs.len(), 1, "{b_msgs:?}");
+	assert!(matches!(b_msgs.remove(0), MessageSendEvent::BroadcastChannelAnnouncement { .. }));
+
+	nodes[0]
+		.chain_source
+		.remove_watched_txn_and_outputs(prev_funding_outpoint, prev_funding_script.clone());
+	nodes[1]
+		.chain_source
+		.remove_watched_txn_and_outputs(prev_funding_outpoint, prev_funding_script);
+
+	send_payment(&nodes[0], &[&nodes[1]], 100_000);
+}
+
+#[test]
+fn test_splice_minimum_depth_applies_to_channels_persisted_without_it() {
+	// A channel persisted without `splice_minimum_depth` (opened before the setting existed, or
+	// while it was unset) reads it back as `None`. The live config must still apply after a
+	// restart, otherwise counterparty-initiated splices on old channels lock at 0-conf.
+	let chanmon_cfgs = create_chanmon_cfgs(2);
+	let node_cfgs = create_node_cfgs(2, &chanmon_cfgs);
+	let (persister, chain_monitor, lsp_reloaded);
+
+	let mut config = test_default_channel_config();
+	config.manually_accept_inbound_channels = true;
+	config.channel_handshake_limits.trust_own_funding_0conf = true;
+
+	let node_chanmgrs =
+		create_node_chanmgrs(2, &node_cfgs, &[Some(config.clone()), Some(config.clone())]);
+	let mut nodes = create_network(2, &node_cfgs, &node_chanmgrs);
+
+	let (funding_tx, channel_id) =
+		open_zero_conf_channel_with_value(&nodes[1], &nodes[0], None, 1_000_000, 0);
+	mine_transaction(&nodes[0], &funding_tx);
+	mine_transaction(&nodes[1], &funding_tx);
+
+	// Restart the LSP with splice_minimum_depth now set.
+	let mut lsp_config = config;
+	lsp_config.channel_handshake_config.splice_minimum_depth = Some(6);
+	let encoded_monitor = get_monitor!(nodes[0], channel_id).encode();
+	reload_node!(
+		nodes[0],
+		lsp_config,
+		&nodes[0].node.encode(),
+		&[&encoded_monitor],
+		persister,
+		chain_monitor,
+		lsp_reloaded
+	);
+	nodes[1].node.peer_disconnected(nodes[0].node.get_our_node_id());
+	let mut reconnect_args = ReconnectArgs::new(&nodes[0], &nodes[1]);
+	reconnect_args.send_channel_ready = (true, true);
+	reconnect_nodes(reconnect_args);
+
+	let coinbase_tx = provide_anchor_reserves(&nodes);
+	let client_contribution = SpliceContribution::SpliceIn {
+		value: Amount::from_sat(500_000),
+		inputs: vec![FundingTxInput::new_p2wpkh(coinbase_tx, 1).unwrap()],
+		change_script: Some(nodes[1].wallet_source.get_change_script().unwrap()),
+	};
+	complete_splice_handshake(&nodes[1], &nodes[0], channel_id, client_contribution);
+	let (lsp_splice_locked, client_splice_locked) = exchange_splice_msgs_until_quiet(&nodes);
+	check_added_monitors(&nodes[0], 1);
+	check_added_monitors(&nodes[1], 1);
+	assert!(client_splice_locked.is_some());
+	assert!(
+		lsp_splice_locked.is_none(),
+		"LSP sent 0-conf splice_locked on a channel persisted without splice_minimum_depth"
+	);
+
+	let splice_tx = nodes[0].tx_broadcaster.txn_broadcast().remove(0);
+	nodes[1].tx_broadcaster.txn_broadcast();
+	mine_transaction(&nodes[0], &splice_tx);
+	let is_splice_locked =
+		|m: &MessageSendEvent| matches!(m, MessageSendEvent::SendSpliceLocked { .. });
+	connect_blocks(&nodes[0], 4);
+	assert!(!nodes[0].node.get_and_clear_pending_msg_events().iter().any(is_splice_locked));
+	connect_blocks(&nodes[0], 1);
+	assert!(nodes[0].node.get_and_clear_pending_msg_events().iter().any(is_splice_locked));
+}
+
 #[test]
 fn test_splice_locked_conveyed_after_reestablish_signature_retransmission() {
 	// A splice acceptor loses the initiator's `tx_signatures` (e.g. it crashed before

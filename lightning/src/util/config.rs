@@ -268,11 +268,13 @@ pub struct ChannelHandshakeConfig {
 	/// [`max_htlcs`]: crate::ln::chan_utils::max_htlcs
 	pub our_max_accepted_htlcs: u16,
 
-	/// If set, counterparty-initiated splices on 0-conf channels will require this many
-	/// confirmations before we send `splice_locked`. This prevents inheriting 0-conf trust
-	/// on funding outputs we didn't construct.
+	/// If set, splices that the counterparty initiated, or that we initiated but the
+	/// counterparty added inputs to, require this many confirmations before we send
+	/// `splice_locked`. The counterparty can double-spend its inputs, so 0-conf trust must not
+	/// extend to them. Splices built only from our own inputs keep the channel's `minimum_depth`.
 	///
-	/// Has no effect on self-initiated splices or non-0-conf channels.
+	/// Read from the current config when a channel is loaded, so it also covers channels opened
+	/// before it was set.
 	///
 	/// Default value: `None` (splice inherits the channel's `minimum_depth`)
 	pub splice_minimum_depth: Option<u32>,

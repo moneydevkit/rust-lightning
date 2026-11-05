@@ -16886,6 +16886,10 @@ where
 					&provided_channel_type_features(&args.config),
 				),
 			)?;
+			// Channels persisted before `splice_minimum_depth` existed (or while it was unset)
+			// read it back as `None`. Use the live config so they are protected too.
+			channel.context.splice_minimum_depth =
+				args.config.channel_handshake_config.splice_minimum_depth;
 			let logger = WithChannelContext::from(&args.logger, &channel.context, None);
 			let channel_id = channel.context.channel_id();
 			channel_id_set.insert(channel_id);
