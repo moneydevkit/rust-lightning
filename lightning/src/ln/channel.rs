@@ -2817,6 +2817,15 @@ impl PendingFunding {
 	}
 }
 
+#[cfg(test)]
+std::thread_local! {
+	/// Test-only: a contribution the splice acceptor adds on the next `splice_init` it handles.
+	/// LDK cannot contribute as acceptor yet, but the protocol lets any peer add inputs to a
+	/// splice we initiate, so tests use this to model such a peer.
+	pub(crate) static TEST_SPLICE_ACCEPTOR_CONTRIBUTION: core::cell::RefCell<Option<SpliceContribution>> =
+		core::cell::RefCell::new(None);
+}
+
 pub(crate) struct SpliceInstructions {
 	adjusted_funding_contribution: SignedAmount,
 	our_funding_inputs: Vec<FundingTxInput>,
@@ -3078,7 +3087,7 @@ where
 	counterparty_max_accepted_htlcs: u16,
 	holder_max_accepted_htlcs: u16,
 	minimum_depth: Option<u32>,
-	splice_minimum_depth: Option<u32>,
+	pub(super) splice_minimum_depth: Option<u32>,
 
 	counterparty_forwarding_info: Option<CounterpartyForwardingInfo>,
 
@@ -9031,7 +9040,9 @@ where
 					funding.minimum_depth_override = None;
 				}
 
-				if !is_initiator {
+				// `for_splice` leaves 0-conf in place on channels we accepted at 0-conf, so also
+				// apply `splice_minimum_depth` whenever the counterparty initiated or added inputs.
+				if !is_initiator || counterparty_added_inputs {
 					if let Some(depth) = self.context.splice_minimum_depth {
 						funding.minimum_depth_override = Some(depth);
 					}
@@ -12310,6 +12321,8 @@ where
 
 		// TODO(splicing): Once splice acceptor can contribute, check that inputs are sufficient,
 		// similarly to the check in `splice_channel`.
+		// Tests may set `TEST_SPLICE_ACCEPTOR_CONTRIBUTION` to model a contributing acceptor.
+		#[cfg(not(test))]
 		debug_assert_eq!(our_funding_contribution, SignedAmount::ZERO);
 
 		let their_funding_contribution = SignedAmount::from_sat(msg.funding_contribution_satoshis);
@@ -12466,7 +12479,19 @@ where
 		ES::Target: EntropySource,
 		L::Target: Logger,
 	{
-		let our_funding_contribution = SignedAmount::from_sat(our_funding_contribution_satoshis);
+		#[cfg(test)]
+		let test_contribution = TEST_SPLICE_ACCEPTOR_CONTRIBUTION.with(|c| c.borrow_mut().take());
+		#[cfg(not(test))]
+		let test_contribution: Option<SpliceContribution> = None;
+		let (our_funding_contribution, our_funding_inputs, change_script) = match test_contribution
+		{
+			Some(contribution) => {
+				let value = contribution.value();
+				let (inputs, _, change_script) = contribution.into_tx_parts();
+				(value, inputs, change_script)
+			},
+			None => (SignedAmount::from_sat(our_funding_contribution_satoshis), Vec::new(), None),
+		};
 		let splice_funding =
 			self.validate_splice_init(msg, our_funding_contribution, minimum_depth)?;
 
@@ -12485,9 +12510,9 @@ where
 			funding_tx_locktime: LockTime::from_consensus(msg.locktime),
 			funding_feerate_sat_per_1000_weight: msg.funding_feerate_per_kw,
 			shared_funding_input: Some(prev_funding_input),
-			our_funding_inputs: Vec::new(),
+			our_funding_inputs,
 			our_funding_outputs: Vec::new(),
-			change_script: None,
+			change_script,
 		};
 
 		let mut interactive_tx_constructor = funding_negotiation_context
