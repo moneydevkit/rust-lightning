@@ -1505,45 +1505,50 @@ fn do_test_propose_splice_while_disconnected(reload: bool, use_0conf: bool) {
 			new_funding_script,
 		)
 	};
-	// Node 0 initiates the first splice. Its splice requires the configured minimum depth, so it
-	// does not send `splice_locked` at signing, even on a zero-conf channel. Node 1, which
-	// accepted the channel from a trusted peer at zero confirmations, locks the splice at signing
-	// when `use_0conf`.
+	// MDK fork: node 0 initiated this splice from its own inputs only, on a channel whose funding
+	// it trusts at zero confirmations, so it still locks the splice at signing (LSPS4 top-ups
+	// depend on this). Upstream 0.2.8 would make it wait for the configured minimum depth.
 	let (splice_tx, splice_locked) =
-		sign_interactive_funding_tx(&nodes[0], &nodes[1], initial_commit_sig, false);
+		sign_interactive_funding_tx(&nodes[0], &nodes[1], initial_commit_sig, use_0conf);
 	expect_splice_pending_event(&nodes[0], &node_id_1);
 	expect_splice_pending_event(&nodes[1], &node_id_0);
-	assert!(splice_locked.is_none());
-	let node_1_splice_locked = if use_0conf {
-		Some(get_event_msg!(nodes[1], MessageSendEvent::SendSpliceLocked, node_id_0))
+
+	let splice_locked = if use_0conf {
+		let (splice_locked, for_node_id) = splice_locked.unwrap();
+		assert_eq!(for_node_id, node_id_1);
+		splice_locked
 	} else {
-		None
+		assert!(splice_locked.is_none());
+
+		mine_transaction(&nodes[0], &splice_tx);
+		mine_transaction(&nodes[1], &splice_tx);
+
+		// Mine enough blocks for the first splice to become locked.
+		connect_blocks(&nodes[0], ANTI_REORG_DELAY - 1);
+		connect_blocks(&nodes[1], ANTI_REORG_DELAY - 1);
+
+		get_event_msg!(nodes[0], MessageSendEvent::SendSpliceLocked, node_id_1)
 	};
-
-	mine_transaction(&nodes[0], &splice_tx);
-	mine_transaction(&nodes[1], &splice_tx);
-
-	// Mine enough blocks for the first splice to become locked on node 0.
-	connect_blocks(&nodes[0], ANTI_REORG_DELAY - 1);
-	connect_blocks(&nodes[1], ANTI_REORG_DELAY - 1);
-
-	let splice_locked = get_event_msg!(nodes[0], MessageSendEvent::SendSpliceLocked, node_id_1);
 	nodes[1].node.handle_splice_locked(node_id_0, &splice_locked);
 
 	// We should see the node which lost the tie-breaker attempt their splice now by first
-	// negotiating quiescence, but their `stfu` won't be sent until after another reconnection. On
-	// a zero-conf channel node 1 already sent its `splice_locked` at signing, so only the
-	// non-zero-conf variant emits one here, alongside the announcement messages.
+	// negotiating quiescence, but their `stfu` won't be sent until after another reconnection.
 	let msg_events = nodes[1].node.get_and_clear_pending_msg_events();
-	assert_eq!(msg_events.len(), if use_0conf { 1 } else { 3 }, "{msg_events:?}");
-	if let Some(node_1_splice_locked) = &node_1_splice_locked {
-		nodes[0].node.handle_splice_locked(node_id_1, node_1_splice_locked);
-	} else {
-		if let MessageSendEvent::SendSpliceLocked { ref msg, .. } = &msg_events[0] {
-			nodes[0].node.handle_splice_locked(node_id_1, msg);
-		} else {
-			panic!("Unexpected event {:?}", &msg_events[0]);
+	assert_eq!(msg_events.len(), if use_0conf { 2 } else { 3 }, "{msg_events:?}");
+	if let MessageSendEvent::SendSpliceLocked { ref msg, .. } = &msg_events[0] {
+		nodes[0].node.handle_splice_locked(node_id_1, msg);
+		if use_0conf {
+			// TODO(splicing): Revisit splice transaction rebroadcasts.
+			let txn_0 = nodes[0].tx_broadcaster.txn_broadcast();
+			assert_eq!(txn_0.len(), 1);
+			assert_eq!(&txn_0[0], &splice_tx);
+			mine_transaction(&nodes[0], &splice_tx);
+			mine_transaction(&nodes[1], &splice_tx);
 		}
+	} else {
+		panic!("Unexpected event {:?}", &msg_events[0]);
+	}
+	if !use_0conf {
 		if let MessageSendEvent::SendAnnouncementSignatures { ref msg, .. } = &msg_events[1] {
 			nodes[0].node.handle_announcement_signatures(node_id_1, msg);
 		} else {
@@ -1551,7 +1556,7 @@ fn do_test_propose_splice_while_disconnected(reload: bool, use_0conf: bool) {
 		}
 	}
 	assert!(matches!(
-		&msg_events[if use_0conf { 0 } else { 2 }],
+		&msg_events[if use_0conf { 1 } else { 2 }],
 		MessageSendEvent::SendStfu { .. }
 	));
 
@@ -2683,10 +2688,12 @@ fn test_splice_minimum_depth_not_applied_for_self_initiated() {
 	let node_id_a = nodes[0].node.get_our_node_id();
 	let node_id_b = nodes[1].node.get_our_node_id();
 
-	// Open a 0-conf channel: node_b initiates channel, node_a accepts 0-conf.
+	// Open a 0-conf channel like an LSPS4 JIT channel: node_a (LSP) funds it and node_b (client)
+	// accepts it at 0-conf. node_a keeps the default `minimum_depth` of 6, which 0.2.8 would apply
+	// to node_a's splices on this outbound channel.
 	let initial_channel_value_sat = 1_000_000;
 	let (funding_tx, channel_id) =
-		open_zero_conf_channel_with_value(&nodes[1], &nodes[0], None, initial_channel_value_sat, 0);
+		open_zero_conf_channel_with_value(&nodes[0], &nodes[1], None, initial_channel_value_sat, 0);
 	mine_transaction(&nodes[0], &funding_tx);
 	mine_transaction(&nodes[1], &funding_tx);
 

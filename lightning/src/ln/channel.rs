@@ -9014,6 +9014,23 @@ where
 			{
 				funding.funding_transaction = Some(funding_tx);
 
+				// `FundingScope::for_splice` requires our configured `minimum_depth` for splices on
+				// outbound channels, since the counterparty may add inputs it can double-spend. A
+				// splice we initiated and funded only from the shared input and our own inputs is
+				// as trustworthy as our own initial funding, so keep the channel's 0-conf depth for
+				// it. LSPS4 relies on this to forward HTLCs right after a top-up splice-in.
+				let counterparty_added_inputs = self
+					.context
+					.interactive_tx_signing_session
+					.as_ref()
+					.map_or(true, |session| session.remote_inputs_count() > 0);
+				if is_initiator
+					&& !counterparty_added_inputs
+					&& self.context.minimum_depth == Some(0)
+				{
+					funding.minimum_depth_override = None;
+				}
+
 				if !is_initiator {
 					if let Some(depth) = self.context.splice_minimum_depth {
 						funding.minimum_depth_override = Some(depth);
