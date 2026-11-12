@@ -24,24 +24,18 @@ pub fn to_string(value: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
 	use super::*;
-	use proptest::prelude::*;
 
-	const MAX_VALUE_MSAT: u64 = 21_000_000_0000_0000_000;
-
-	fn arb_forward_fee_params() -> impl Strategy<Value = (u64, u64)> {
-		(0u64..MAX_VALUE_MSAT, 0u64..MAX_VALUE_MSAT)
-	}
-
-	proptest! {
-		#[test]
-		fn test_compute_forward_fee((payment_size_msat, fee_proportional) in arb_forward_fee_params()) {
-			if let Some(res) = compute_forward_fee(payment_size_msat, fee_proportional) {
-				assert_eq!(res as f32, (payment_size_msat as f32 * fee_proportional as f32));
-			} else {
-				// Check we actually overflowed.
-				let max_value = u64::MAX as u128;
-				assert!((payment_size_msat as u128 * fee_proportional as u128) > max_value);
-			}
-		}
+	#[test]
+	fn test_compute_forward_fee() {
+		// Fee is in parts per million, rounded up.
+		assert_eq!(compute_forward_fee(0, 2_000), Some(0));
+		assert_eq!(compute_forward_fee(1_000_000, 0), Some(0));
+		assert_eq!(compute_forward_fee(1_000_000, 2_000), Some(2_000));
+		assert_eq!(compute_forward_fee(1, 1), Some(1));
+		assert_eq!(compute_forward_fee(999_999, 1), Some(1));
+		assert_eq!(compute_forward_fee(1_000_001, 1), Some(2));
+		// The intermediate product overflows `u64` before the division.
+		assert_eq!(compute_forward_fee(u64::MAX, 2), None);
+		assert_eq!(compute_forward_fee(u64::MAX, 1), None);
 	}
 }

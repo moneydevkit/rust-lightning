@@ -1325,6 +1325,7 @@ fn stale_zero_value_queue_entry_is_failed_back() {
 		Some(service_config),
 		None,
 		Arc::new(DefaultTimeProvider),
+		service_inner.logger,
 	)
 	.unwrap();
 	let service_handler = restarted_lm.lsps2_service_handler().unwrap();
