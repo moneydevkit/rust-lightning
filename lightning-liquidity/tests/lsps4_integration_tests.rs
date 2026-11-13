@@ -400,6 +400,34 @@ fn htlc_above_send_limit_but_within_capacity_gets_liquidity() {
 	});
 }
 
+/// A channel still being opened for the peer must stop LSPS4 from asking for another one: an
+/// open slower than the liquidity cooldown would otherwise get a duplicate open for the same HTLC.
+#[test]
+fn htlc_waits_for_pending_channel_instead_of_opening_another() {
+	run_with_client_channel(100_000, |nodes, scid, channel| {
+		let client_id = nodes.client_node.node.get_our_node_id();
+		nodes.service_node.node.create_channel(client_id, 200_000, 0, 42, None, None).unwrap();
+		nodes.service_node.node.get_and_clear_pending_msg_events();
+		let channels = nodes.service_node.node.list_channels_with_counterparty(&client_id);
+		assert_eq!(channels.len(), 2);
+		assert_eq!(channels.iter().filter(|c| !c.is_usable).count(), 1);
+		connect_client(nodes);
+
+		let amount = htlc_forwarding_at_least(channel.next_outbound_htlc_limit_msat + 1);
+		let htlc = intercept_htlc(nodes, scid, 1, 0, amount, None);
+		handle(&nodes.service_node, scid, &htlc);
+
+		assert!(nodes.service_node.liquidity_manager.next_event().is_none());
+		// Still held for when the pending channel is ready, not sent and not failed.
+		assert_eq!(
+			nodes.service_node.node.intercepted_htlc_inbound_amount_msat(htlc.id),
+			Some(amount)
+		);
+		nodes.service_node.node.process_pending_htlc_forwards();
+		assert!(nodes.service_node.node.get_and_clear_pending_events().is_empty());
+	});
+}
+
 /// Control: an HTLC exactly at the send limit is forwarded and reaches the client.
 #[test]
 fn htlc_at_send_limit_is_forwarded() {

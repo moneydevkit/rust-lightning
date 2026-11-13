@@ -868,9 +868,26 @@ where
 					.iter()
 					.fold(required_amount, |acc, h| acc.saturating_add(h.amount_to_forward_msat));
 
-				// Always open a new channel. A new channel has no earlier commitment the peer
-				// could broadcast, so it is safe at 0-conf. A splice of a channel we funded must
-				// wait for our minimum_depth, longer than we can hold the HTLC.
+				// A channel that is not usable yet (e.g. the one we opened for an earlier HTLC)
+				// may carry this HTLC once ready. Wait for it instead of opening another one;
+				// channel_ready retries the held HTLCs.
+				if channels.iter().any(|c| !c.is_usable) {
+					log_info!(
+						self.logger,
+						"[LSPS4] calculate_htlc_actions: {} has a channel that is not usable yet \
+						 - waiting for it instead of opening another",
+						their_node_id
+					);
+					return HtlcProcessingActions {
+						forwards,
+						new_channel_needed_msat: None,
+						channel_count,
+					};
+				}
+
+				// Open a new channel. A new channel has no earlier commitment the peer could
+				// broadcast, so it is safe at 0-conf. A splice of a channel we funded must wait
+				// for our minimum_depth, longer than we can hold the HTLC.
 				return HtlcProcessingActions {
 					forwards,
 					new_channel_needed_msat: Some(total_remaining_amount),
