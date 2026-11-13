@@ -380,17 +380,17 @@ fn htlc_above_send_limit_but_within_capacity_gets_liquidity() {
 		handle(&nodes.service_node, scid, &htlc);
 
 		match nodes.service_node.liquidity_manager.next_event() {
-			Some(LiquidityEvent::LSPS4Service(LSPS4ServiceEvent::SpliceChannel {
-				channel_id,
+			Some(LiquidityEvent::LSPS4Service(LSPS4ServiceEvent::OpenChannel {
 				amt_to_forward_msat,
+				channel_count,
 				..
 			})) => {
-				assert_eq!(channel_id, channel.channel_id);
+				assert_eq!(channel_count, 1);
 				assert!(amt_to_forward_msat > limit);
 			},
-			e => panic!("Expected SpliceChannel, got {:?}", e),
+			e => panic!("Expected OpenChannel, got {:?}", e),
 		}
-		// Still held for the timer to forward after the splice, not sent and not failed.
+		// Still held for the timer to forward after the open, not sent and not failed.
 		assert_eq!(
 			nodes.service_node.node.intercepted_htlc_inbound_amount_msat(htlc.id),
 			Some(amount)

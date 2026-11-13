@@ -10,7 +10,6 @@
 //! Contains LSPS4 event types
 
 use crate::lsps0::ser::LSPSRequestId;
-use lightning::ln::types::ChannelId;
 use lightning_types::payment::PaymentHash;
 use std::string::String;
 use std::vec::Vec;
@@ -60,24 +59,6 @@ pub enum LSPS4ServiceEvent {
 		/// The amount we need to forward to the client after opening.
 		amt_to_forward_msat: u64,
 		/// The number of channels currently open with the peer when the request is made.
-		channel_count: usize,
-	},
-	/// You should splice into an existing channel to add capacity.
-	///
-	/// If the splice fails, fall back to opening a new channel using the same sizing policy
-	/// as [`OpenChannel`].
-	///
-	/// [`OpenChannel`]: Self::OpenChannel
-	SpliceChannel {
-		/// The node whose channel to splice.
-		their_network_key: PublicKey,
-		/// The channel to splice into (the largest usable channel with this peer).
-		channel_id: ChannelId,
-		/// The user channel id, for diagnostics.
-		user_channel_id: u128,
-		/// Additional capacity needed (msat). The splice-in amount should be at least this.
-		amt_to_forward_msat: u64,
-		/// The number of channels currently open with the peer.
 		channel_count: usize,
 	},
 }
